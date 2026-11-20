@@ -20,7 +20,7 @@ import z from '@deepseek-ai/schemastery'
 
 import { excerptOf, lastHumanComment, listNotifications, listOwnRepos, listRepoIssues, resolveToken, whoami } from './lib/github.mjs'
 import { countsOf, loadState, pruneThreads, saveState, statePath, upsertThread } from './lib/state.mjs'
-import { judgeNotification, judgeRepoItem, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
+import { bucketHint, bucketOf, bucketText, judgeNotification, judgeRepoItem, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
 
 export const name = 'repo-watch'
 
@@ -131,29 +131,33 @@ function shortDay(at) {
 /**
  * The one message this plugin sends.
  *
- * Written for someone reading it on a phone, in Chinese, with no knowledge of the
- * code: why this thread exists ("有人回复了你提的 issue"), who spoke, what they
- * said, and where to answer. The earlier version printed the internal reason key
- * (`someone-replied-to-my-thread`) and the reader could not tell what happened.
+ * It is a roll-call, not a dump. Listing every thread with its excerpt felt wrong
+ * in practice: a push is read on a phone in two seconds, and four paragraphs of
+ * somebody else's comment is more than that moment can absorb. So the message says
+ * how many there are, split by what they want from you, and how to ask for the
+ * detail — which is one reply away, in the same chat.
  */
 function composeWaitingMessage(entries) {
-  const head = entries.length === 1
-    ? '🔔 有 1 条在等你回'
-    : `🔔 有 ${entries.length} 条在等你回`
-  const blocks = entries.slice(0, 5).map((entry, index) => {
-    const lines = [`${index + 1}. ${entry.key}${entry.title ? `　${entry.title}` : ''}`]
-    lines.push(`   ${reasonText(entry.reason, entry.thread?.kind ?? entry.kind)}`)
-    const when = shortDay(entry.spokeAt || entry.lastActivityAt)
-    if (entry.actor) {
-      lines.push(`   ${entry.actor}${when ? `（${when}）` : ''}${entry.snippet ? `：${entry.snippet}` : ''}`)
-    } else if (when) {
-      lines.push(`   ${when}`)
-    }
-    if (entry.url) lines.push(`   ${entry.url}`)
-    return lines.join('\n')
-  })
-  if (entries.length > 5) blocks.push(`……还有 ${entries.length - 5} 条，发「/watch」看全部`)
-  return `${head}\n\n${blocks.join('\n\n')}`
+  const buckets = { reply: [], action: [], other: [] }
+  for (const entry of entries) buckets[bucketOf(entry.reason)].push(entry)
+  const total = entries.length
+  const head = total === 1 ? '🔔 有 1 条新消息' : `🔔 有 ${total} 条新消息`
+  const lines = [head, '']
+  for (const key of ['reply', 'action', 'other']) {
+    const count = buckets[key].length
+    if (count === 0) continue
+    lines.push(`· ${bucketText(key)} ${count} 条 — ${bucketHint(key)}`)
+  }
+  lines.push('')
+  const hints = []
+  if (buckets.reply.length) hints.push('「看1」只看需要你回复的')
+  if (buckets.action.length) hints.push('「看2」只看需要你处理的')
+  lines.push(`回复「看」查看全部${hints.length ? `，${hints.join('，')}` : ''}。`)
+  const newest = entries
+    .slice()
+    .sort((a, b) => Number(b.lastActivityAt ?? 0) - Number(a.lastActivityAt ?? 0))[0]
+  if (newest) lines.push(`最近一条：${newest.key}`)
+  return lines.join('\n')
 }
 
 /**
@@ -345,13 +349,20 @@ const statusTool = (config) => ({
 const digestTool = (config) => ({
   name: 'repo_watch_digest',
   description:
-    'List the threads the watchtower is tracking. kind="waiting" returns what needs a reply '
-    + 'from the user, "quiet" returns recent activity that does not, "deep" adds the stored '
-    + 'reason and last actor for each thread.',
+    'List the threads the watchtower is tracking, with who spoke last and what they said. '
+    + 'Call this whenever the user asks to see the details after a watchtower push — a reply of '
+    + '"看" / "详情" / "show me" means bucket "all"; "看1" means bucket "reply"; "看2" means "action". '
+    + 'kind="waiting" (default) returns what needs the user, "quiet" returns the rest, "deep" adds '
+    + 'the stored reason and last actor for each thread.',
   parameters: {
     type: 'object',
     properties: {
       kind: { type: 'string', enum: ['waiting', 'quiet', 'deep'], description: 'Which digest to produce.' },
+      bucket: {
+        type: 'string',
+        enum: ['all', 'reply', 'action', 'other'],
+        description: 'Narrow to one bucket of the push roll-call: reply (someone answered you), action (someone opened something in your repos), all.',
+      },
       limit: { type: 'number', description: 'Maximum threads to list (default 20).' },
     },
     required: ['kind'],
@@ -365,19 +376,31 @@ const digestTool = (config) => ({
     const state = loadState(config ?? {})
     const limit = Math.max(1, Number(args?.limit ?? 20))
     const wanted = String(args?.kind ?? 'waiting')
-    const threads = Object.entries(state.threads)
+    const bucket = String(args?.bucket ?? 'all')
+    const rows = Object.entries(state.threads)
       .filter(([, thread]) => (wanted === 'waiting' ? thread.state === 'pending' : thread.state !== 'pending'))
+      .filter(([, thread]) => bucket === 'all' || bucketOf(thread.reason) === bucket)
       .sort((a, b) => Number(b[1]?.lastActivityAt ?? 0) - Number(a[1]?.lastActivityAt ?? 0))
-      .slice(0, limit)
-    if (threads.length === 0) return { ok: true, text: wanted === 'waiting' ? '没有需要你处理的。' : '没有其他活动。' }
-    const lines = threads.map(([key, thread]) => {
-      const when = thread.lastActivityAt ? new Date(thread.lastActivityAt).toLocaleDateString() : ''
-      const head = `· ${key}${thread.title ? ` 「${thread.title}」` : ''}`
-      const detail = wanted === 'deep'
-        ? `  ${thread.reason ?? ''}${thread.lastActor ? ` · 最后一条来自 ${thread.lastActor}` : ''} · ${when}`
-        : `  ${when}`
-      return `${head}\n${detail}`
+    if (rows.length === 0) {
+      return { ok: true, text: wanted === 'waiting' ? '没有需要你处理的。' : '没有其他活动。' }
+    }
+    const shown = rows.slice(0, limit)
+    const head = shown.length === 1 ? '1 条' : `${shown.length} 条`
+    const lines = [`共 ${rows.length} 条，显示 ${head}：`]
+    shown.forEach(([key, thread], index) => {
+      lines.push('')
+      lines.push(`${index + 1}. ${key}${thread.title ? `　${thread.title}` : ''}`)
+      lines.push(`   ${reasonText(thread.reason, thread.kind)}`)
+      const when = shortDay(thread.lastActivityAt)
+      if (thread.lastActor) {
+        lines.push(`   ${thread.lastActor}${when ? `（${when}）` : ''}${thread.lastText ? `：${thread.lastText}` : ''}`)
+      } else if (when) {
+        lines.push(`   ${when}`)
+      }
+      if (thread.url) lines.push(`   ${thread.url}`)
+      if (wanted === 'deep' && thread.state) lines.push(`   状态：${thread.state} · 已提醒 ${Number(thread.notifyCount ?? 0)} 次`)
     })
+    if (rows.length > shown.length) lines.push('', `……还有 ${rows.length - shown.length} 条，加大 limit 或收窄 bucket。`)
     return { ok: true, text: lines.join('\n') }
   },
 })

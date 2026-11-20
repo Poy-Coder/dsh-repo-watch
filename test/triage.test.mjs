@@ -8,6 +8,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  bucketHint,
+  bucketOf,
+  bucketText,
   inQuietHours,
   isBotLogin,
   judgeNotification,
@@ -133,4 +136,20 @@ test('long excerpts are truncated at the requested length', () => {
   const text = excerptOf('一'.repeat(200), 40)
   assert.equal(text.length, 40)
   assert.ok(text.endsWith('…'))
+})
+
+test('every judgement lands in exactly one push bucket', () => {
+  assert.equal(bucketOf('someone-replied-to-my-thread'), 'reply')
+  assert.equal(bucketOf('mentioned'), 'reply')
+  assert.equal(bucketOf('review-requested'), 'reply')
+  assert.equal(bucketOf('external-issue'), 'action')
+  assert.equal(bucketOf('external-pr'), 'action')
+  assert.equal(bucketOf('something-unknown'), 'other')
+  // 推送里出现的是中文分类名与说明，不是 bucket 的英文 key
+  for (const bucket of ['reply', 'action', 'other']) {
+    assert.match(bucketText(bucket), /[\u4e00-\u9fa5]/)
+    assert.match(bucketHint(bucket), /[\u4e00-\u9fa5]/)
+  }
+  assert.equal(bucketText('reply'), '需要你回复')
+  assert.equal(bucketText('action'), '需要你处理')
 })

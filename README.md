@@ -39,33 +39,36 @@
 
 ## 它推给你的消息长这样
 
-推的是**中文、带原话、能直接判断要不要回**的一段：
+推的是**一条报数**，不是内容倾泻——在手机上两秒能看完，要不要看细节由你决定：
 
 ```
-🔔 有 2 条在等你回
+🔔 有 4 条新消息
 
-1. hAcKlyc/MyAgents#646　[Bug] 非 Anthropic 模型经 anthropic 协议桥接时，推理文本混入回复正文
-   有人回复了你提的 issue
-   hAcKlyc（10-15）：本机取证进展：保持待查，不关闭。这次运行了真实 SDK wrapper + native binary…
-   https://github.com/hAcKlyc/MyAgents/issues/646
+· 需要你回复 4 条 — 有人回复了你提的 issue/PR、@ 了你，或请你 review
 
-2. awesome-dsh-plugin/awesome-dsh-plugin#16013　Add Poy-Coder/dsh-channel-feishu
+回复「看」查看全部，「看1」只看需要你回复的。
+最近一条：awesome-dsh-plugin/awesome-dsh-plugin#15938
+```
+
+回「看」之后，会话里给出带原话的明细（同一条只在聊天里展开，不再二次推送）：
+
+```
+共 4 条，显示 4 条：
+
+1. awesome-dsh-plugin/awesome-dsh-plugin#15938　Add: two IM channel plugins…
    有人回复了你提的 PR
-   fkysly（11-17）：已合并。核对：入站默认关闭；开启后 allowedUsers 留空时，第一个发消息的人被绑定为主人…
-   https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/16013
+   fkysly（11-19）：这个 PR 的合并有冲突，我核过后手动并入了 main…
+   https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/15938
 ```
 
-每条包含四件事：**是谁的哪条**、**为什么算"在等你"**（有人回复/被 @/请你 review/别人开的 issue）、**他说了什么**（原话截断到 80 字）、**去哪里回**。
-
-只发一次：同一条 thread 处理前不会重复提醒；进 `done` 之后又有新动静才会再出现。夜间（默认 23:00–08:00）只排队，第二天合并发送。
+**为什么不直接推明细**：一条推送里塞四条别人的长评论，读起来是负担；而"有几条、各自要什么"才是决定要不要现在处理的信息。
 
 ## 状态
 
 - [x] 占位发布（0.0.1）
 - [x] 轮询 + 水位 + 状态机（0.1.0）
-- [x] `waiting` / `quiet` 摘要
 - [x] 通过飞书/微信通道推送
-- [x] 中文文案 + 原话摘录
+- [x] 中文报数式推送 + 「看」展开明细（0.1.2）
 - [ ] `deep` 摘要（分类 + 优先级 + 相似历史）
 - [ ] 会话内快捷指令（`/watch done #646`）
 
