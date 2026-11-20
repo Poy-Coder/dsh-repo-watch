@@ -20,7 +20,7 @@ import z from '@deepseek-ai/schemastery'
 
 import { excerptOf, lastHumanComment, listNotifications, listOwnRepos, listRepoIssues, resolveToken, whoami } from './lib/github.mjs'
 import { countsOf, loadState, pruneThreads, saveState, statePath, upsertThread } from './lib/state.mjs'
-import { classify, priorityOf, similarTo } from './lib/insight.mjs'
+import { classify, priorityOf, progressOf, similarTo } from './lib/insight.mjs'
 import { bucketHint, bucketOf, bucketText, inQuietHours, isBotLogin, judgeNotification, judgeRepoItem, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
 
 export const name = 'repo-watch'
@@ -467,12 +467,14 @@ const digestTool = (config) => ({
       }
       if (wanted === 'deep') {
         const classification = classify({ title: thread.title, kind: thread.kind })
+        const progress = progressOf(thread.lastText)
         const ageDays = thread.lastActivityAt ? (Date.now() - Number(thread.lastActivityAt)) / 86_400_000 : 0
         const priority = priorityOf({
           classification, title: thread.title, reason: thread.reason,
-          ageDays, notifyCount: Number(thread.notifyCount ?? 0),
+          ageDays, notifyCount: Number(thread.notifyCount ?? 0), progress,
         })
         lines.push(`   判断：${classification.label} · 优先级${priority.label}（${priority.score >= 0 ? '+' : ''}${priority.score}）`)
+        lines.push(`   进展：${progress.label}${progress.signal ? `（依据「${progress.signal}」）` : ''}`)
         if (priority.reasons.length) lines.push(`   理由：${priority.reasons.join('；')}`)
         const similar = similarTo({ key, title: thread.title }, Object.entries(state.threads)
           .filter(([other]) => other !== key)

@@ -7,7 +7,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { classify, priorityOf, similarTo, tokensOf } from '../lib/insight.mjs'
+import { classify, priorityOf, progressOf, similarTo, tokensOf } from '../lib/insight.mjs'
 
 test('labels win over wording', () => {
   assert.equal(classify({ title: '怎么用这个功能', labels: ['bug'] }).kind, 'bug')
@@ -94,4 +94,32 @@ test('similar threads need two shared tokens and the same repository', () => {
 
 test('no tokens means no guesses', () => {
   assert.deepEqual(similarTo({ key: 'o/r#1', title: '' }, [{ key: 'o/r#2', title: 'x' }]), [])
+})
+
+test('the last words tell you whose move it is', () => {
+  assert.equal(progressOf('能否提供一下日志？').state, 'asked-back')
+  assert.equal(progressOf('已在 dev/0.5.2 开始排查，先定位来源').state, 'working')
+  assert.equal(progressOf('已修复并合并到 main').state, 'resolved')
+  assert.equal(progressOf('收到了，我们看看').state, 'unknown')
+  assert.equal(progressOf('').state, 'unknown')
+})
+
+test('progress outweighs age when scoring', () => {
+  const base = { classification: { kind: 'bug' }, title: '启动崩溃', reason: 'someone-replied-to-my-thread' }
+  const waiting = priorityOf({ ...base, progress: { state: 'asked-back' } })
+  const working = priorityOf({ ...base, progress: { state: 'working' } })
+  const resolved = priorityOf({ ...base, progress: { state: 'resolved' } })
+  assert.ok(waiting.score > working.score, '“在等你补充”应当比“对方在修”更急')
+  assert.ok(working.score > resolved.score, '“已修复”应当最低')
+  assert.match(resolved.reasons.join(), /已修复/)
+})
+
+test('a resolved thread can drop below an ordinary question', () => {
+  const resolved = priorityOf({
+    classification: { kind: 'bug' },
+    title: '启动崩溃',
+    progress: { state: 'resolved' },
+  })
+  // 标题里的“崩溃”仍会加分，但被“已修复”抵掉大部分，最终不应判为高优先级
+  assert.notEqual(resolved.level, 'high')
 })
