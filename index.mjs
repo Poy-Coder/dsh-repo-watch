@@ -134,14 +134,18 @@ function shortDay(at) {
  * It is a roll-call, not a dump. Listing every thread with its excerpt felt wrong
  * in practice: a push is read on a phone in two seconds, and four paragraphs of
  * somebody else's comment is more than that moment can absorb. So the message says
- * how many there are, split by what they want from you, and how to ask for the
- * detail — which is one reply away, in the same chat.
+ * how many there are, where they come from, split by what they want from you, and
+ * how to ask for the detail — which is one reply away, in the same chat.
+ *
+ * Plain text by design: no emoji, no decoration. The wording says 查看 rather than
+ * 看 because a one-character prompt reads like a typo, even though short replies
+ * are exactly what the digest accepts.
  */
 function composeWaitingMessage(entries) {
   const buckets = { reply: [], action: [], other: [] }
   for (const entry of entries) buckets[bucketOf(entry.reason)].push(entry)
   const total = entries.length
-  const head = total === 1 ? '🔔 有 1 条新消息' : `🔔 有 ${total} 条新消息`
+  const head = `有 ${total} 条新消息（来源：GitHub）`
   const lines = [head, '']
   for (const key of ['reply', 'action', 'other']) {
     const count = buckets[key].length
@@ -149,14 +153,19 @@ function composeWaitingMessage(entries) {
     lines.push(`· ${bucketText(key)} ${count} 条 — ${bucketHint(key)}`)
   }
   lines.push('')
-  const hints = []
-  if (buckets.reply.length) hints.push('「看1」只看需要你回复的')
-  if (buckets.action.length) hints.push('「看2」只看需要你处理的')
-  lines.push(`回复「看」查看全部${hints.length ? `，${hints.join('，')}` : ''}。`)
+  const hints = ['回复「查看」查看全部明细']
+  if (buckets.reply.length) hints.push('「查看 1」只看需要你回复的')
+  if (buckets.action.length) hints.push('「查看 2」只看需要你处理的')
+  lines.push(`${hints.join('；')}。`)
   const newest = entries
     .slice()
     .sort((a, b) => Number(b.lastActivityAt ?? 0) - Number(a.lastActivityAt ?? 0))[0]
-  if (newest) lines.push(`最近一条：${newest.key}`)
+  if (newest) {
+    const kind = String(newest.thread?.kind ?? newest.kind ?? '')
+    const kindText = kind === 'pr' ? '（PR）' : kind === 'issue' ? '（issue）' : ''
+    const title = newest.title ? `　${newest.title}` : ''
+    lines.push(`最近一条：${newest.key}${title}${kindText}`)
+  }
   return lines.join('\n')
 }
 
@@ -350,8 +359,9 @@ const digestTool = (config) => ({
   name: 'repo_watch_digest',
   description:
     'List the threads the watchtower is tracking, with who spoke last and what they said. '
-    + 'Call this whenever the user asks to see the details after a watchtower push — a reply of '
-    + '"看" / "详情" / "show me" means bucket "all"; "看1" means bucket "reply"; "看2" means "action". '
+    + 'Call this whenever the user asks to see the detail after a watchtower push: "查看", "详情", '
+    + '"展开", "看", "列表" all mean bucket "all"; "查看 1" / "看1" means bucket "reply"; '
+    + '"查看 2" / "看2" means "action". Users reply briefly, so match on the intent, not on an exact word. '
     + 'kind="waiting" (default) returns what needs the user, "quiet" returns the rest, "deep" adds '
     + 'the stored reason and last actor for each thread.',
   parameters: {
