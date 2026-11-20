@@ -20,6 +20,7 @@ import z from '@deepseek-ai/schemastery'
 
 import { excerptOf, lastHumanComment, listNotifications, listOwnRepos, listRepoIssues, resolveToken, whoami } from './lib/github.mjs'
 import { countsOf, loadState, pruneThreads, saveState, statePath, upsertThread } from './lib/state.mjs'
+import { classify, priorityOf, similarTo } from './lib/insight.mjs'
 import { bucketHint, bucketOf, bucketText, judgeNotification, judgeRepoItem, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
 
 export const name = 'repo-watch'
@@ -464,7 +465,23 @@ const digestTool = (config) => ({
         lines.push(`   ${when}`)
       }
       if (thread.url) lines.push(`   ${thread.url}`)
-      if (wanted === 'deep' && thread.state) lines.push(`   状态：${thread.state} · 已提醒 ${Number(thread.notifyCount ?? 0)} 次`)
+      if (wanted === 'deep') {
+        const classification = classify({ title: thread.title })
+        const ageDays = thread.lastActivityAt ? (Date.now() - Number(thread.lastActivityAt)) / 86_400_000 : 0
+        const priority = priorityOf({
+          classification, title: thread.title, reason: thread.reason,
+          ageDays, notifyCount: Number(thread.notifyCount ?? 0),
+        })
+        lines.push(`   判断：${classification.label} · 优先级${priority.label}（${priority.score >= 0 ? '+' : ''}${priority.score}）`)
+        if (priority.reasons.length) lines.push(`   理由：${priority.reasons.join('；')}`)
+        const similar = similarTo({ key, title: thread.title }, Object.entries(state.threads)
+          .filter(([other]) => other !== key)
+          .map(([other, entry]) => ({ key: other, ...entry })))
+        if (similar.length) {
+          lines.push(`   相似：${similar.map((item) => `${item.key}（${item.state}）`).join('、')}`)
+        }
+        lines.push(`   状态：${thread.state} · 已提醒 ${Number(thread.notifyCount ?? 0)} 次`)
+      }
     })
     if (rows.length > shown.length) lines.push('', `……还有 ${rows.length - shown.length} 条，加大 limit 或收窄 bucket。`)
     return { ok: true, text: lines.join('\n') }
