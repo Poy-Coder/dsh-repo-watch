@@ -466,7 +466,7 @@ const digestTool = (config) => ({
       }
       if (thread.url) lines.push(`   ${thread.url}`)
       if (wanted === 'deep') {
-        const classification = classify({ title: thread.title })
+        const classification = classify({ title: thread.title, kind: thread.kind })
         const ageDays = thread.lastActivityAt ? (Date.now() - Number(thread.lastActivityAt)) / 86_400_000 : 0
         const priority = priorityOf({
           classification, title: thread.title, reason: thread.reason,

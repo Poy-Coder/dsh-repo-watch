@@ -22,6 +22,19 @@ test('the four kinds are recognised from wording alone', () => {
   assert.equal(classify({ title: 'dsh-repo-watch#42' }).kind, 'other')
 })
 
+test('[Bug] in the title is enough, without a label', () => {
+  // 维护者更常把 [Bug] 写在标题里，而不是加标签；首版只匹配标签，整类都掉进"其他"
+  assert.equal(classify({ title: '[Bug] 非 Anthropic 模型经桥接时推理文本混入正文' }).kind, 'bug')
+})
+
+test('a pull request is its own kind, not an unclassified report', () => {
+  const pr = classify({ title: 'Add: two IM channel plugins', kind: 'pr' })
+  assert.equal(pr.kind, 'pr')
+  assert.equal(pr.label, '变更/PR')
+  // 但 PR 标题里出现崩溃，仍然按缺陷处理——那说明这条 PR 在修 bug
+  assert.equal(classify({ title: 'Fix: 启动崩溃', kind: 'pr' }).kind, 'bug')
+})
+
 test('classification names the signal it used', () => {
   const byLabel = classify({ title: 'x', labels: ['regression'] })
   assert.equal(byLabel.kind, 'bug')
