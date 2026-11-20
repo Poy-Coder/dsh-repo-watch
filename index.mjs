@@ -1,12 +1,448 @@
 /**
- * dsh-repo-watch — name-reservation release.
+ * dsh-repo-watch — a repository watchtower for DSH.
  *
- * 0.0.1 publishes the package name and the bundle manifest only. The watchtower
- * itself (poller, state machine, digests) lands in 0.1.0. Installing this version
- * is harmless: it registers nothing and schedules nothing.
+ * The premise: a maintainer does not open GitHub on a schedule, so anything that
+ * only exists inside a notification list is effectively invisible. This plugin
+ * polls in the background, keeps its own state, and speaks only when a thread
+ * *enters* the state "someone is waiting on you".
+ *
+ * Design notes that matter more than the code:
+ *   - GitHub's read flag is not used. Opening a notification marks it read and
+ *     loses it forever (the problem octobox exists to solve), so the plugin keeps
+ *     its own pending/seen/done state in `~/.dsh/repo-watch.json`.
+ *   - Decisions live in `lib/triage.mjs` as pure functions; this file only wires
+ *     them to the network, a timer, and the chat channel.
+ *   - It never writes to GitHub. No comment, no label, no close.
  */
+import { setTimeout as delay } from 'node:timers/promises'
+
+import z from '@deepseek-ai/schemastery'
+
+import { excerptOf, lastHumanComment, listNotifications, listOwnRepos, listRepoIssues, resolveToken, whoami } from './lib/github.mjs'
+import { countsOf, loadState, pruneThreads, saveState, statePath, upsertThread } from './lib/state.mjs'
+import { judgeNotification, judgeRepoItem, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
+
 export const name = 'repo-watch'
 
-export function apply() {
-  // Intentionally empty until 0.1.0.
+/**
+ * `tools` is a hard dependency: the plugin's whole surface is four tools, and
+ * reaching for `ctx.tools` without declaring it fails activation with
+ * "cannot get property \"tools\" without inject".
+ */
+export const inject = ['tools']
+
+export const Config = z.object({
+  repos: z.array(z.string()).default([])
+    .description('Repositories to watch ("owner/name"). Empty discovers every non-fork repo the token owns.'),
+  pollMinutes: z.number().default(15).description('How often the background poll runs.'),
+  notify: z.boolean().default(true).description('Send "someone is waiting" messages to the chat. Off = local state only.'),
+  pushTool: z.string().default('')
+    .description('Tool used to deliver a message (e.g. feishu_send_message). Empty picks the first *_send_message on this DSH.'),
+  quietHours: z.string().default('23-8')
+    .description('Local hours with no messages, "23-8". Anything arriving then is folded into the next daytime message.'),
+  maxP0PerHour: z.number().default(1).description('At most this many "waiting" messages per hour; extra ones merge.'),
+  backfillDays: z.number().default(30).description('First run only: how far back to look so the state file starts informed.'),
+  tokenEnv: z.string().default('GITHUB_TOKEN').description('Credential reference holding the GitHub token.'),
+  muteBots: z.boolean().default(true).description('Ignore bot accounts ([bot], dependabot, github-actions…).'),
+  stateFile: z.string().default('').description('Override the state path (defaults to ~/.dsh/repo-watch.json).'),
+})
+
+const oneHour = 60 * 60 * 1000
+
+/** Mutable per-process view of the schedule; a reload rebuilds it from the state file. */
+const runtime = {
+  ready: false,
+  lastPollAt: 0,
+  lastPollError: '',
+  lastPushAt: 0,
+  pushesThisHour: 0,
+  hourStartedAt: 0,
+  token: '',
+  me: '',
+  repos: [],
+  pendingQueue: [],
 }
+
+const errorText = (error) => (error instanceof Error ? error.message : String(error))
+
+/**
+ * Deliver one piece of text through whatever channel this DSH already has.
+ *
+ * Reuses the installed IM channel plugin instead of shipping its own transport:
+ * the user configured that chat once, and there is no reason to ask twice.
+ * Resolved at call time so a disabled channel degrades to "log only".
+ */
+async function pushText(ctx, config, text) {
+  if (config?.notify === false) return { ok: false, reason: 'notify-disabled' }
+  const now = Date.now()
+  if (now - runtime.hourStartedAt > oneHour) {
+    runtime.hourStartedAt = now
+    runtime.pushesThisHour = 0
+  }
+  const limit = Math.max(1, Number(config?.maxP0PerHour ?? 1))
+  if (runtime.pushesThisHour >= limit) return { ok: false, reason: 'hourly-limit' }
+
+  const tools = typeof ctx.get === 'function' ? ctx.get('tools') : undefined
+  if (!tools || typeof tools.execute !== 'function') return { ok: false, reason: 'no-tools' }
+  let names = []
+  try {
+    names = tools.definitions().map((definition) => String(definition?.name ?? ''))
+  } catch { /* registry unavailable */ }
+  const senders = names.filter((toolName) => /_send_message$/.test(toolName))
+  const preferred = String(config?.pushTool ?? '').trim()
+  const target = preferred && senders.includes(preferred) ? preferred : senders[0]
+  if (!target) return { ok: false, reason: 'no-channel' }
+
+  try {
+    const batch = await tools.execute({
+      calls: [{
+        type: 'tool-call',
+        id: `repo-watch-${now}`,
+        name: target,
+        arguments: JSON.stringify({ text }),
+      }],
+      signal: AbortSignal.timeout(25_000),
+    })
+    const first = Array.isArray(batch?.results) ? batch.results[0] : undefined
+    if (first?.isError) return { ok: false, reason: `tool-error: ${target}` }
+    runtime.pushesThisHour += 1
+    runtime.lastPushAt = now
+    return { ok: true, tool: target }
+  } catch (error) {
+    return { ok: false, reason: `dispatch-failed: ${errorText(error)}` }
+  }
+}
+
+/** "2026-10-16" as "10-16", and today's as "今天". */
+function shortDay(at) {
+  const value = Number(at)
+  if (!value) return ''
+  const date = new Date(value)
+  const today = new Date()
+  const sameDay = date.getFullYear() === today.getFullYear()
+    && date.getMonth() === today.getMonth()
+    && date.getDate() === today.getDate()
+  if (sameDay) return '今天'
+  const mm = String(date.getMonth() + 1).padStart(2, '0')
+  const dd = String(date.getDate()).padStart(2, '0')
+  return `${mm}-${dd}`
+}
+
+/**
+ * The one message this plugin sends.
+ *
+ * Written for someone reading it on a phone, in Chinese, with no knowledge of the
+ * code: why this thread exists ("有人回复了你提的 issue"), who spoke, what they
+ * said, and where to answer. The earlier version printed the internal reason key
+ * (`someone-replied-to-my-thread`) and the reader could not tell what happened.
+ */
+function composeWaitingMessage(entries) {
+  const head = entries.length === 1
+    ? '🔔 有 1 条在等你回'
+    : `🔔 有 ${entries.length} 条在等你回`
+  const blocks = entries.slice(0, 5).map((entry, index) => {
+    const lines = [`${index + 1}. ${entry.key}${entry.title ? `　${entry.title}` : ''}`]
+    lines.push(`   ${reasonText(entry.reason, entry.thread?.kind ?? entry.kind)}`)
+    const when = shortDay(entry.spokeAt || entry.lastActivityAt)
+    if (entry.actor) {
+      lines.push(`   ${entry.actor}${when ? `（${when}）` : ''}${entry.snippet ? `：${entry.snippet}` : ''}`)
+    } else if (when) {
+      lines.push(`   ${when}`)
+    }
+    if (entry.url) lines.push(`   ${entry.url}`)
+    return lines.join('\n')
+  })
+  if (entries.length > 5) blocks.push(`……还有 ${entries.length - 5} 条，发「/watch」看全部`)
+  return `${head}\n\n${blocks.join('\n\n')}`
+}
+
+/**
+ * One poll: notifications (someone acted toward me) + repo scan (someone opened
+ * something of mine). Both paths feed the same judgement and the same state file.
+ */
+async function pollOnce(ctx, config) {
+  const token = runtime.token || resolveToken(config?.tokenEnv)
+  if (!token) {
+    runtime.lastPollError = 'no GitHub token (credentials refs GITHUB_TOKEN, or GH_TOKEN)'
+    return { ok: false, reason: 'no-token' }
+  }
+  runtime.token = token
+  if (!runtime.me) runtime.me = await whoami(token)
+  if (!runtime.me) {
+    runtime.lastPollError = 'token rejected by /user'
+    return { ok: false, reason: 'bad-token' }
+  }
+  let repos = Array.isArray(config?.repos) ? config.repos.filter(Boolean) : []
+  if (repos.length === 0) {
+    if (runtime.repos.length === 0) runtime.repos = (await listOwnRepos(token)).items
+    repos = runtime.repos
+  }
+
+  const state = loadState(config ?? {})
+  const now = Date.now()
+  const backfill = Math.max(1, Number(config?.backfillDays ?? 30)) * 24 * 60 * 60 * 1000
+  const since = state.watermark > 0 ? state.watermark : now - backfill
+
+  const candidates = []
+  const failures = []
+
+  const notifications = await listNotifications(token, {})
+  if (!notifications.ok) failures.push(`notifications: ${notifications.error ?? notifications.status}`)
+  for (const notification of notifications.items) {
+    const thread = threadOf(notification?.subject?.url ?? notification?.subject?.latest_comment_url)
+    if (!thread) continue
+    if (config?.muteBots !== false && /\[bot\]$/i.test(String(notification?.subject?.title ?? ''))) continue
+    let actor = ''
+    let snippet = ''
+    let spokeAt = 0
+    const reason = String(notification.reason ?? '')
+    if (reason === 'author' || reason === 'comment') {
+      const last = await lastHumanComment(token, thread, {})
+      actor = String(last?.author ?? '')
+      snippet = String(last?.text ?? '')
+      spokeAt = Number(last?.at ?? 0)
+    }
+    const verdict = judgeNotification({ notification, me: runtime.me, lastActor: actor })
+    candidates.push({
+      key: thread.key, thread, actor, snippet, spokeAt, verdict,
+      title: String(notification?.subject?.title ?? ''),
+      url: `https://github.com/${thread.repo}/${thread.kind === 'pr' ? 'pull' : 'issues'}/${thread.number}`,
+      lastActivityAt: spokeAt || Date.parse(notification?.updated_at ?? '') || now,
+    })
+  }
+
+  for (const repo of repos) {
+    const result = await listRepoIssues(token, repo, { since })
+    if (!result.ok) { failures.push(`${repo}: ${result.error ?? result.status}`); continue }
+    for (const issue of result.items) {
+      const thread = threadOf(issue?.url)
+      if (!thread) continue
+      const verdict = judgeRepoItem({ issue, me: runtime.me })
+      candidates.push({
+        key: thread.key, thread, actor: String(issue?.user?.login ?? ''), verdict,
+        snippet: excerptOf(issue?.body ?? ''),
+        spokeAt: Date.parse(issue?.created_at ?? '') || 0,
+        title: String(issue?.title ?? ''),
+        url: String(issue?.html_url ?? ''),
+        lastActivityAt: Date.parse(issue?.updated_at ?? '') || now,
+      })
+    }
+  }
+
+  const fresh = []
+  for (const candidate of candidates) {
+    if (!candidate.verdict.pending) continue
+    const previous = state.threads[candidate.key]
+    const notify = shouldNotify({
+      previous: previous?.state,
+      pending: true,
+      lastActivityAt: candidate.lastActivityAt,
+      stateSince: Number(previous?.stateSince ?? 0),
+    })
+    upsertThread(state, candidate.key, {
+      kind: candidate.thread.kind,
+      title: candidate.title,
+      lastActor: candidate.actor,
+      lastText: candidate.snippet,
+      lastActivityAt: candidate.lastActivityAt,
+      reason: candidate.verdict.reason,
+      url: candidate.url,
+    }, { pending: true, notify })
+    if (notify) fresh.push({ ...candidate, reason: candidate.verdict.reason })
+  }
+
+  state.watermark = now
+  pruneThreads(state, now)
+  saveState(config ?? {}, state)
+
+  runtime.lastPollAt = now
+  runtime.lastPollError = failures.join('; ')
+
+  if (fresh.length > 0 && config?.notify !== false) runtime.pendingQueue.push(...fresh)
+  return { ok: true, scanned: candidates.length, fresh: fresh.length, failures }
+}
+
+/** Flush queued "waiting" items, respecting the quiet window. */
+async function flushQueue(ctx, config) {
+  if (runtime.pendingQueue.length === 0) return
+  const hour = new Date().getHours()
+  const quiet = inQuietWindow(hour, config?.quietHours)
+  if (quiet) return
+  const entries = runtime.pendingQueue.splice(0, runtime.pendingQueue.length)
+  const sent = await pushText(ctx, config, composeWaitingMessage(entries))
+  if (!sent.ok) runtime.pendingQueue.unshift(...entries)
+}
+
+const inQuietWindow = (hour, window) => {
+  const m = /^(\d{1,2})\s*-\s*(\d{1,2})$/.exec(String(window ?? '').trim())
+  if (!m) return false
+  const start = Number(m[1]) % 24
+  const end = Number(m[2]) % 24
+  const h = Number(hour) % 24
+  if (start === end) return false
+  return start < end ? h >= start && h < end : h >= start || h < end
+}
+
+export function apply(ctx, config) {
+  ctx.tools.register(statusTool(config))
+  ctx.tools.register(digestTool(config))
+  ctx.tools.register(ackTool(config))
+  ctx.tools.register(checkTool(ctx, config))
+
+  ctx.effect(() => {
+    let disposed = false
+    const minutes = Math.max(1, Number(config?.pollMinutes ?? 15))
+    const tick = async () => {
+      if (disposed) return
+      try {
+        await pollOnce(ctx, config)
+        await flushQueue(ctx, config)
+      } catch (error) {
+        runtime.lastPollError = errorText(error)
+      }
+    }
+    // Startup is deferred so plugin activation stays fast and a slow network
+    // never delays the rest of the profile.
+    const kickoff = setTimeout(() => { void tick() }, 20_000)
+    kickoff.unref?.()
+    const timer = setInterval(() => { void tick() }, minutes * 60_000)
+    timer.unref?.()
+    return () => {
+      disposed = true
+      clearTimeout(kickoff)
+      clearInterval(timer)
+    }
+  }, 'dsh-repo-watch: poller')
+}
+
+const statusTool = (config) => ({
+  name: 'repo_watch_status',
+  description:
+    'Report the repository watchtower state: how many threads are pending/seen/done, '
+    + 'which repositories are watched, when the last poll ran, and what failed if anything did. '
+    + 'Use it before answering questions about GitHub activity.',
+  parameters: { type: 'object', properties: {}, additionalProperties: false },
+  output: {
+    schema: { type: 'object', properties: { ok: { type: 'boolean' }, text: { type: 'string' } }, required: ['ok'], additionalProperties: true },
+    render(_args, value) { return [{ type: 'text', text: String(value?.text ?? '') }] },
+  },
+  async execute() {
+    const state = loadState(config ?? {})
+    const counts = countsOf(state)
+    const watched = (config?.repos?.length ? config.repos.join(', ') : runtime.repos.join(', ')) || '(尚未发现)'
+    const lines = [
+      `待你处理：${counts.pending} · 已看过：${counts.seen} · 已完成：${counts.done}`,
+      `监视仓库：${watched}`,
+      `上次轮询：${runtime.lastPollAt ? new Date(runtime.lastPollAt).toLocaleString() : '还没跑过'}`,
+      `登录身份：${runtime.me || '(未知)'}`,
+      `状态文件：${statePath(config ?? {})}`,
+    ]
+    if (runtime.lastPollError) lines.push(`上次错误：${runtime.lastPollError}`)
+    return { ok: true, text: lines.join('\n') }
+  },
+})
+
+const digestTool = (config) => ({
+  name: 'repo_watch_digest',
+  description:
+    'List the threads the watchtower is tracking. kind="waiting" returns what needs a reply '
+    + 'from the user, "quiet" returns recent activity that does not, "deep" adds the stored '
+    + 'reason and last actor for each thread.',
+  parameters: {
+    type: 'object',
+    properties: {
+      kind: { type: 'string', enum: ['waiting', 'quiet', 'deep'], description: 'Which digest to produce.' },
+      limit: { type: 'number', description: 'Maximum threads to list (default 20).' },
+    },
+    required: ['kind'],
+    additionalProperties: false,
+  },
+  output: {
+    schema: { type: 'object', properties: { ok: { type: 'boolean' }, text: { type: 'string' } }, required: ['ok'], additionalProperties: true },
+    render(_args, value) { return [{ type: 'text', text: String(value?.text ?? '') }] },
+  },
+  async execute(args) {
+    const state = loadState(config ?? {})
+    const limit = Math.max(1, Number(args?.limit ?? 20))
+    const wanted = String(args?.kind ?? 'waiting')
+    const threads = Object.entries(state.threads)
+      .filter(([, thread]) => (wanted === 'waiting' ? thread.state === 'pending' : thread.state !== 'pending'))
+      .sort((a, b) => Number(b[1]?.lastActivityAt ?? 0) - Number(a[1]?.lastActivityAt ?? 0))
+      .slice(0, limit)
+    if (threads.length === 0) return { ok: true, text: wanted === 'waiting' ? '没有需要你处理的。' : '没有其他活动。' }
+    const lines = threads.map(([key, thread]) => {
+      const when = thread.lastActivityAt ? new Date(thread.lastActivityAt).toLocaleDateString() : ''
+      const head = `· ${key}${thread.title ? ` 「${thread.title}」` : ''}`
+      const detail = wanted === 'deep'
+        ? `  ${thread.reason ?? ''}${thread.lastActor ? ` · 最后一条来自 ${thread.lastActor}` : ''} · ${when}`
+        : `  ${when}`
+      return `${head}\n${detail}`
+    })
+    return { ok: true, text: lines.join('\n') }
+  },
+})
+
+const ackTool = (config) => ({
+  name: 'repo_watch_ack',
+  description:
+    'Mark a tracked thread as seen, done, or snoozed. This only writes the local state file; '
+    + 'GitHub is never modified. A done thread comes back if new activity arrives.',
+  parameters: {
+    type: 'object',
+    properties: {
+      thread: { type: 'string', description: 'Thread key, "owner/repo#123".' },
+      as: { type: 'string', enum: ['seen', 'done', 'snooze'], description: 'New state.' },
+      hours: { type: 'number', description: 'Snooze length when as="snooze" (default 24).' },
+    },
+    required: ['thread', 'as'],
+    additionalProperties: false,
+  },
+  output: {
+    schema: { type: 'object', properties: { ok: { type: 'boolean' }, text: { type: 'string' } }, required: ['ok'], additionalProperties: true },
+    render(_args, value) { return [{ type: 'text', text: String(value?.text ?? '') }] },
+  },
+  async execute(args) {
+    const key = String(args?.thread ?? '').trim()
+    const target = String(args?.as ?? '').trim()
+    const state = loadState(config ?? {})
+    const thread = state.threads[key]
+    if (!thread) return { ok: false, text: `没有这条记录：${key}` }
+    if (target === 'snooze') {
+      const hours = Math.max(1, Number(args?.hours ?? 24))
+      thread.state = 'seen'
+      thread.snoozeUntil = Date.now() + hours * oneHour
+      thread.stateSince = Date.now()
+    } else if (target === 'seen' || target === 'done') {
+      thread.state = target
+      thread.stateSince = Date.now()
+      thread.snoozeUntil = 0
+    } else {
+      return { ok: false, text: `未知状态：${target}` }
+    }
+    saveState(config ?? {}, state)
+    return { ok: true, text: `${key} → ${thread.state}${thread.snoozeUntil ? `（到 ${new Date(thread.snoozeUntil).toLocaleString()}）` : ''}` }
+  },
+})
+
+const checkTool = (ctx, config) => ({
+  name: 'repo_watch_check',
+  description: 'Run one poll immediately instead of waiting for the background timer, then report what it found.',
+  parameters: { type: 'object', properties: {}, additionalProperties: false },
+  output: {
+    schema: { type: 'object', properties: { ok: { type: 'boolean' }, text: { type: 'string' } }, required: ['ok'], additionalProperties: true },
+    render(_args, value) { return [{ type: 'text', text: String(value?.text ?? '') }] },
+  },
+  async execute() {
+    const result = await pollOnce(ctx, config)
+    if (!result.ok) return { ok: false, text: `轮询失败：${result.reason}` }
+    await flushQueue(ctx, config)
+    return {
+      ok: true,
+      text: `扫描 ${result.scanned} 条，新增待处理 ${result.fresh} 条`
+        + (result.failures?.length ? `\n失败：${result.failures.join('; ')}` : ''),
+    }
+  },
+})
+
+/** Exposed for the smoke test: wiring a delay keeps timers testable. */
+export const _internals = { pollOnce, pushText, runtime, delay, composeWaitingMessage }

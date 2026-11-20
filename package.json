@@ -1,6 +1,6 @@
 {
   "name": "dsh-repo-watch",
-  "version": "0.0.1",
+  "version": "0.1.1",
   "type": "module",
   "description": "DSH repository watchtower: it watches your GitHub repos in the background and only speaks up when someone is actually waiting on you.",
   "license": "MIT",
@@ -17,7 +17,6 @@
     "index.mjs",
     "lib/*.mjs",
     "cordis.patch.yml",
-    "locale/*.json",
     "test/*.mjs",
     "README.md",
     "LICENSE"
@@ -26,10 +25,13 @@
     "manifestVersion": 1,
     "bundle": { "patch": "./cordis.patch.yml" }
   },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.19.0"
+  },
   "engines": {
     "node": ">=20.18.1"
   },
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test test/triage.test.mjs"
   }
 }

@@ -37,13 +37,37 @@
 
 **推送只认 `* → pending` 的转换**，其余一律静默——没有新转换就一条消息都不发。
 
+## 它推给你的消息长这样
+
+推的是**中文、带原话、能直接判断要不要回**的一段：
+
+```
+🔔 有 2 条在等你回
+
+1. hAcKlyc/MyAgents#646　[Bug] 非 Anthropic 模型经 anthropic 协议桥接时，推理文本混入回复正文
+   有人回复了你提的 issue
+   hAcKlyc（10-15）：本机取证进展：保持待查，不关闭。这次运行了真实 SDK wrapper + native binary…
+   https://github.com/hAcKlyc/MyAgents/issues/646
+
+2. awesome-dsh-plugin/awesome-dsh-plugin#16013　Add Poy-Coder/dsh-channel-feishu
+   有人回复了你提的 PR
+   fkysly（11-17）：已合并。核对：入站默认关闭；开启后 allowedUsers 留空时，第一个发消息的人被绑定为主人…
+   https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/16013
+```
+
+每条包含四件事：**是谁的哪条**、**为什么算"在等你"**（有人回复/被 @/请你 review/别人开的 issue）、**他说了什么**（原话截断到 80 字）、**去哪里回**。
+
+只发一次：同一条 thread 处理前不会重复提醒；进 `done` 之后又有新动静才会再出现。夜间（默认 23:00–08:00）只排队，第二天合并发送。
+
 ## 状态
 
 - [x] 占位发布（0.0.1）
-- [ ] 轮询 + 水位 + 状态机（0.1.0）
-- [ ] `waiting` / `quiet` 摘要
-- [ ] 通过飞书/微信通道推送
+- [x] 轮询 + 水位 + 状态机（0.1.0）
+- [x] `waiting` / `quiet` 摘要
+- [x] 通过飞书/微信通道推送
+- [x] 中文文案 + 原话摘录
 - [ ] `deep` 摘要（分类 + 优先级 + 相似历史）
+- [ ] 会话内快捷指令（`/watch done #646`）
 
 ## 许可
 
