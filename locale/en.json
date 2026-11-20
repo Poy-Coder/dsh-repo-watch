@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Repository watchtower",
+    "description": "Watches your GitHub repositories in the background and speaks up only when someone is actually waiting on you: replies to your threads, mentions, review requests, and issues opened in your repos."
+  }
+}

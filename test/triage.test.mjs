@@ -83,6 +83,23 @@ test('announce only when a thread enters pending or reopens after done', () => {
   assert.equal(shouldNotify({ previous: 'pending', pending: false }), false)
 })
 
+test('a snoozed thread stays pending but stays quiet', () => {
+  const now = 1_000_000
+  // 首次出现也按 snooze 静默：snooze 的语义是"先别告诉我"
+  assert.equal(shouldNotify({ previous: undefined, pending: true, snoozeUntil: now + 60_000, now }), false)
+  assert.equal(shouldNotify({ previous: 'done', pending: true, lastActivityAt: 20, stateSince: 10, snoozeUntil: now + 60_000, now }), false)
+  // 到期后照常提醒
+  assert.equal(shouldNotify({ previous: undefined, pending: true, snoozeUntil: now - 1, now }), true)
+})
+
+test('a done thread still reopens when new activity arrives after snooze', () => {
+  const now = 1_000_000
+  assert.equal(
+    shouldNotify({ previous: 'done', pending: true, lastActivityAt: 90, stateSince: 10, snoozeUntil: now - 1, now }),
+    true,
+  )
+})
+
 test('quiet hours wrap around midnight', () => {
   assert.equal(inQuietHours(23, '23-8'), true)
   assert.equal(inQuietHours(3, '23-8'), true)

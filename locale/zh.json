@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "仓库守望",
+    "description": "在后台盯着你的 GitHub 仓库，只在真的有人等你时才说一句：你提的 issue/PR 有人回复、有人 @ 你、请你 review，或者有人给你的仓库开了 issue。"
+  }
+}

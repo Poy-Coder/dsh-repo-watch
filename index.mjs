@@ -170,6 +170,28 @@ function composeWaitingMessage(entries) {
 }
 
 /**
+ * Fold newly noticed activity into the stored list.
+ *
+ * One entry per thread (the newest wins), bounded, and pruned by age: this list
+ * exists so "what else moved" can be answered, not as an archive.
+ */
+function mergeActivity(previous, noticed, now) {
+  const byKey = new Map()
+  for (const item of Array.isArray(previous) ? previous : []) {
+    if (item?.key) byKey.set(item.key, item)
+  }
+  for (const item of noticed) {
+    const existing = byKey.get(item.key)
+    if (!existing || Number(item.at ?? 0) >= Number(existing.at ?? 0)) byKey.set(item.key, item)
+  }
+  const keepMs = 30 * 24 * 60 * 60 * 1000
+  return [...byKey.values()]
+    .filter((item) => now - Number(item.at ?? 0) <= keepMs)
+    .sort((a, b) => Number(b.at ?? 0) - Number(a.at ?? 0))
+    .slice(0, 200)
+}
+
+/**
  * One poll: notifications (someone acted toward me) + repo scan (someone opened
  * something of mine). Both paths feed the same judgement and the same state file.
  */
@@ -243,14 +265,31 @@ async function pollOnce(ctx, config) {
   }
 
   const fresh = []
+  const noticed = []
   for (const candidate of candidates) {
-    if (!candidate.verdict.pending) continue
+    if (!candidate.verdict.pending) {
+      // Activity that does not need an answer is still activity: it is what the
+      // "quiet" digest is for, and throwing it away would make that digest empty.
+      if (!/^(i-spoke-last|already-read|closed|mine)$/.test(candidate.verdict.reason)) {
+        noticed.push({
+          key: candidate.key,
+          title: candidate.title,
+          actor: candidate.actor,
+          text: candidate.snippet,
+          reason: candidate.verdict.reason,
+          at: candidate.lastActivityAt,
+        })
+      }
+      continue
+    }
     const previous = state.threads[candidate.key]
     const notify = shouldNotify({
       previous: previous?.state,
       pending: true,
       lastActivityAt: candidate.lastActivityAt,
       stateSince: Number(previous?.stateSince ?? 0),
+      snoozeUntil: Number(previous?.snoozeUntil ?? 0),
+      now,
     })
     upsertThread(state, candidate.key, {
       kind: candidate.thread.kind,
@@ -264,6 +303,7 @@ async function pollOnce(ctx, config) {
     if (notify) fresh.push({ ...candidate, reason: candidate.verdict.reason })
   }
 
+  state.activity = mergeActivity(state.activity, noticed, now)
   state.watermark = now
   pruneThreads(state, now)
   saveState(config ?? {}, state)
@@ -387,6 +427,22 @@ const digestTool = (config) => ({
     const limit = Math.max(1, Number(args?.limit ?? 20))
     const wanted = String(args?.kind ?? 'waiting')
     const bucket = String(args?.bucket ?? 'all')
+
+    // `quiet` answers "what else moved", which is activity, not threads: those
+    // entries did not become pending, so they are not in the state machine.
+    if (wanted === 'quiet') {
+      const items = (Array.isArray(state.activity) ? state.activity : []).slice(0, limit)
+      if (items.length === 0) return { ok: true, text: '最近没有其他动静。' }
+      const lines = [`最近 ${items.length} 条其他动静：`]
+      items.forEach((item, index) => {
+        lines.push('')
+        lines.push(`${index + 1}. ${item.key}${item.title ? `　${item.title}` : ''}`)
+        lines.push(`   ${reasonText(item.reason)}${item.actor ? ` · ${item.actor}` : ''}${item.at ? `（${shortDay(item.at)}）` : ''}`)
+        if (item.text) lines.push(`   ${item.text}`)
+      })
+      return { ok: true, text: lines.join('\n') }
+    }
+
     const rows = Object.entries(state.threads)
       .filter(([, thread]) => (wanted === 'waiting' ? thread.state === 'pending' : thread.state !== 'pending'))
       .filter(([, thread]) => bucket === 'all' || bucketOf(thread.reason) === bucket)
@@ -478,4 +534,4 @@ const checkTool = (ctx, config) => ({
 })
 
 /** Exposed for the smoke test: wiring a delay keeps timers testable. */
-export const _internals = { pollOnce, pushText, runtime, delay, composeWaitingMessage }
+export const _internals = { pollOnce, pushText, runtime, delay, composeWaitingMessage, mergeActivity }
