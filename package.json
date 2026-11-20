@@ -1,0 +1,35 @@
+{
+  "name": "dsh-repo-watch",
+  "version": "0.0.1",
+  "type": "module",
+  "description": "DSH repository watchtower: it watches your GitHub repos in the background and only speaks up when someone is actually waiting on you.",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/Poy-Coder/dsh-repo-watch.git" },
+  "homepage": "https://github.com/Poy-Coder/dsh-repo-watch#readme",
+  "bugs": { "url": "https://github.com/Poy-Coder/dsh-repo-watch/issues" },
+  "keywords": ["dsh", "deepseek-harness", "plugin", "github", "issues", "maintainer", "watch"],
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "lib/*.mjs",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "test/*.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": { "patch": "./cordis.patch.yml" }
+  },
+  "engines": {
+    "node": ">=20.18.1"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  }
+}

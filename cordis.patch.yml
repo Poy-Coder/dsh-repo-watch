@@ -1,0 +1,9 @@
+- insert:
+    - id: repo-watch
+      name: 'dsh-repo-watch'
+      config:
+        repos: []
+        pollMinutes: 15
+        notify: true
+        pushChannel: auto
+        quietHours: '23-8'
