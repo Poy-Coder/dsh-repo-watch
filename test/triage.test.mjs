@@ -100,6 +100,29 @@ test('a done thread still reopens when new activity arrives after snooze', () =>
   )
 })
 
+test('an expired snooze resurfaces instead of going silent forever', () => {
+  const now = 1_000_000
+  // ack 把 snooze 记成 seen；若只按 seen 判定，这条永远不会再提醒
+  assert.equal(
+    shouldNotify({ previous: 'seen', pending: true, lastActivityAt: 90, stateSince: 10, snoozeUntil: now - 1, now }),
+    true,
+  )
+  // 没有新活动就不该吵：snooze 到期只是"可以重新提醒"，不是"必须提醒"
+  assert.equal(
+    shouldNotify({ previous: 'seen', pending: true, lastActivityAt: 5, stateSince: 10, snoozeUntil: now - 1, now }),
+    false,
+  )
+  // 仍在 snooze 内：安静
+  assert.equal(
+    shouldNotify({ previous: 'seen', pending: true, lastActivityAt: 90, stateSince: 10, snoozeUntil: now + 60_000, now }),
+    false,
+  )
+})
+
+test('a plain seen thread (never snoozed) stays quiet', () => {
+  assert.equal(shouldNotify({ previous: 'seen', pending: true, lastActivityAt: 90, stateSince: 10, snoozeUntil: 0 }), false)
+})
+
 test('quiet hours wrap around midnight', () => {
   assert.equal(inQuietHours(23, '23-8'), true)
   assert.equal(inQuietHours(3, '23-8'), true)

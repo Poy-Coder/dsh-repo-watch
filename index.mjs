@@ -21,7 +21,7 @@ import z from '@deepseek-ai/schemastery'
 import { excerptOf, lastHumanComment, listNotifications, listOwnRepos, listRepoIssues, resolveToken, whoami } from './lib/github.mjs'
 import { countsOf, loadState, pruneThreads, saveState, statePath, upsertThread } from './lib/state.mjs'
 import { classify, priorityOf, similarTo } from './lib/insight.mjs'
-import { bucketHint, bucketOf, bucketText, judgeNotification, judgeRepoItem, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
+import { bucketHint, bucketOf, bucketText, inQuietHours, isBotLogin, judgeNotification, judgeRepoItem, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
 
 export const name = 'repo-watch'
 
@@ -227,7 +227,6 @@ async function pollOnce(ctx, config) {
   for (const notification of notifications.items) {
     const thread = threadOf(notification?.subject?.url ?? notification?.subject?.latest_comment_url)
     if (!thread) continue
-    if (config?.muteBots !== false && /\[bot\]$/i.test(String(notification?.subject?.title ?? ''))) continue
     let actor = ''
     let snippet = ''
     let spokeAt = 0
@@ -238,6 +237,9 @@ async function pollOnce(ctx, config) {
       snippet = String(last?.text ?? '')
       spokeAt = Number(last?.at ?? 0)
     }
+    // Mute bots by who spoke, not by what the title looks like: the first version
+    // tested the subject title for a "[bot]" suffix, which never matched the actor.
+    if (config?.muteBots !== false && actor && isBotLogin(actor)) continue
     const verdict = judgeNotification({ notification, me: runtime.me, lastActor: actor })
     candidates.push({
       key: thread.key, thread, actor, snippet, spokeAt, verdict,
@@ -320,22 +322,12 @@ async function pollOnce(ctx, config) {
 async function flushQueue(ctx, config) {
   if (runtime.pendingQueue.length === 0) return
   const hour = new Date().getHours()
-  const quiet = inQuietWindow(hour, config?.quietHours)
-  if (quiet) return
+  if (inQuietHours(hour, config?.quietHours)) return
   const entries = runtime.pendingQueue.splice(0, runtime.pendingQueue.length)
   const sent = await pushText(ctx, config, composeWaitingMessage(entries))
   if (!sent.ok) runtime.pendingQueue.unshift(...entries)
 }
 
-const inQuietWindow = (hour, window) => {
-  const m = /^(\d{1,2})\s*-\s*(\d{1,2})$/.exec(String(window ?? '').trim())
-  if (!m) return false
-  const start = Number(m[1]) % 24
-  const end = Number(m[2]) % 24
-  const h = Number(hour) % 24
-  if (start === end) return false
-  return start < end ? h >= start && h < end : h >= start || h < end
-}
 
 export function apply(ctx, config) {
   ctx.tools.register(statusTool(config))
@@ -444,8 +436,13 @@ const digestTool = (config) => ({
       return { ok: true, text: lines.join('\n') }
     }
 
+    const nowMs = Date.now()
     const rows = Object.entries(state.threads)
-      .filter(([, thread]) => (wanted === 'waiting' ? thread.state === 'pending' : thread.state !== 'pending'))
+      // A snoozed thread is still owed an answer: it belongs in "waiting", marked as
+      // deferred, instead of disappearing until someone remembers it exists.
+      .filter(([, thread]) => (wanted === 'waiting'
+        ? thread.state === 'pending' || (thread.state === 'seen' && Number(thread.snoozeUntil ?? 0) > nowMs)
+        : thread.state !== 'pending'))
       .filter(([, thread]) => bucket === 'all' || bucketOf(thread.reason) === bucket)
       .sort((a, b) => Number(b[1]?.lastActivityAt ?? 0) - Number(a[1]?.lastActivityAt ?? 0))
     if (rows.length === 0) {
@@ -465,6 +462,9 @@ const digestTool = (config) => ({
         lines.push(`   ${when}`)
       }
       if (thread.url) lines.push(`   ${thread.url}`)
+      if (Number(thread.snoozeUntil ?? 0) > Date.now()) {
+        lines.push(`   已延后到 ${new Date(Number(thread.snoozeUntil)).toLocaleString()}`)
+      }
       if (wanted === 'deep') {
         const classification = classify({ title: thread.title, kind: thread.kind })
         const ageDays = thread.lastActivityAt ? (Date.now() - Number(thread.lastActivityAt)) / 86_400_000 : 0
