@@ -74,8 +74,44 @@
 - [x] 插件图标与本地化文案（0.2.0）
 - [x] `deep` 摘要：类别 + 优先级 + 相似 thread，全部可解释（0.3.0）
 - [x] 从对方最后一句话判断「谁该动」：已修复 / 在推进 / 在等你补充（0.4.0）
+- [x] `[Bug]` 标题与 PR 单独归类（0.3.1）
+- [x] 机器人按发言人抑制、`snooze` 到期会重新浮现、延后条目不再重复出现（0.3.2）
+- [x] 关闭的 issue/PR 会自动结案（0.4.2–0.4.4）
+- [x] `ack done` 不会被下一轮轮询覆盖（0.4.6）
+- [x] 别人仓库里已合并/已关闭的 thread 也会结案（0.4.7）
 - [ ] 用 GitHub 上的标签/评论数补充优先级信号
 - [ ] 多账号 / 组织仓库
+
+## 配置
+
+| 字段 | 默认 | 作用 |
+|---|---|---|
+| `repos` | 空 = 你所有仓库 | 只监视这些仓库（`owner/name`）|
+| `pollMinutes` | 15 | 轮询间隔（最小 1）|
+| `notify` | true | 关掉就只记状态、不推送 |
+| `pushTool` | 自动 | 指定推送工具；空则自动选第一个 `*_send_message` |
+| `quietHours` | `23-8` | 静默时段（本地时间，跨午夜可写 `23-8`）|
+| `maxP0PerHour` | 1 | 每小时最多推几条报数 |
+| `backfillDays` | 30 | 首次运行往回看多久 |
+| `closedLookbackHours` | 24 | 每轮回扫多少小时的关闭事件，用来结案 |
+| `recheckForeignThreads` | true | 每轮复核别人仓库里被跟踪的 thread 是否已关闭/合并（上限 30 条）|
+| `muteBots` | true | 按发言人抑制机器人 |
+| `tokenEnv` | `GITHUB_TOKEN` | 读 token 的环境变量名 |
+| `stateFile` | `~/.dsh/repo-watch.json` | 状态文件位置 |
+
+## 状态机：为什么 `ack done` 不会自己回来
+
+一条 thread 有三态：`pending`（等你）/ `seen`（看过了）/ `done`（处理完）。
+
+关键规则：**你标的 `done`/`seen` 不会被下一轮轮询覆盖**——判定逻辑（“对方最后说话的不是我”）在对方再开口前一直为真，若每轮都拿它覆盖状态，`done` 只能活一个轮询周期。现在只有 **更新的活动** 才能把 `done` 重新变回 `pending`。
+
+同理，`snooze` 是“先别告诉我”，不是“永远别说”：到期后条目仍留在「等你」列表，并标注「延后已到期，等你处理」。
+
+结案有三条路径：你标 done、仓库内的 issue 被关闭（`closedLookbackHours` 回扫）、别人仓库里你提的 thread 被关闭或合并（`recheckForeignThreads` 复核）。
+
+## 诊断日志
+
+`~/.dsh/repo-watch.log`，JSONL，超过 2 MB 轮转。记录 `push/sent`、`push/skipped`（带原因）、`settled-by-closure`、`settled-elsewhere`。「为什么没收到推送」「为什么这条还挂着」都能从这里回答。
 
 ## 三种摘要
 
