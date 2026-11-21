@@ -21,6 +21,7 @@ import z from '@deepseek-ai/schemastery'
 import { excerptOf, lastHumanComment, listClosedIssues, listNotifications, listOwnRepos, listRepoIssues, resolveToken, whoami } from './lib/github.mjs'
 import { countsOf, loadState, pruneThreads, saveState, statePath, upsertThread } from './lib/state.mjs'
 import { classify, priorityOf, progressOf, similarTo } from './lib/insight.mjs'
+import { logRecord } from './lib/log.mjs'
 import { bucketHint, bucketOf, bucketText, closureTargets, inQuietHours, isBotLogin, judgeNotification, judgeRepoItem, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
 
 export const name = 'repo-watch'
@@ -110,7 +111,7 @@ async function pushText(ctx, config, text) {
     runtime.lastPushAt = now
     // Log the delivery, not just the attempt: "why did I get no push" is only
     // answerable if a successful send leaves a record.
-    logInbound(config, { event: 'push', result: 'sent', level: 'info', tool: target, chars: String(text ?? '').length })
+    logRecord({ event: 'push', result: 'sent', level: 'info', tool: target, chars: String(text ?? '').length })
     return { ok: true, tool: target }
   } catch (error) {
     return { ok: false, reason: `dispatch-failed: ${errorText(error)}` }
@@ -322,7 +323,7 @@ async function pollOnce(ctx, config) {
       thread.snoozeUntil = 0
       thread.resolvedBy = 'closed'
       closed.push(key)
-      logInbound(config, { event: 'inbound', result: 'settled-by-closure', level: 'info', thread: key })
+      logRecord({ event: 'inbound', result: 'settled-by-closure', level: 'info', thread: key })
     }
   }
 
@@ -345,7 +346,7 @@ async function flushQueue(ctx, config) {
   if (inQuietHours(hour, config?.quietHours)) return
   const entries = runtime.pendingQueue.splice(0, runtime.pendingQueue.length)
   const sent = await pushText(ctx, config, composeWaitingMessage(entries))
-  if (!sent.ok) logInbound(config, { event: 'push', result: 'skipped', level: 'warn', reason: sent.reason, count: entries.length })
+  if (!sent.ok) logRecord({ event: 'push', result: 'skipped', level: 'warn', reason: sent.reason, count: entries.length })
   if (!sent.ok) runtime.pendingQueue.unshift(...entries)
 }
 
