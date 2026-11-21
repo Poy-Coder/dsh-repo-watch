@@ -37,10 +37,19 @@ test('a record lands as one JSONL line under DSH_HOME', () => {
 })
 
 test('logging never throws, even with nothing serialisable', () => {
-  const circular = { event: 'push' }
-  circular.self = circular
-  assert.doesNotThrow(() => logRecord(circular))
-  assert.doesNotThrow(() => logRecord(undefined))
+  // Isolate: an earlier version wrote to the real ~/.dsh and polluted it.
+  const home = mkdtempSync(join(tmpdir(), 'dsh-repo-watch-log-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    const circular = { event: 'push' }
+    circular.self = circular
+    assert.doesNotThrow(() => logRecord(circular))
+    assert.doesNotThrow(() => logRecord(undefined))
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+  }
 })
 
 test('a writer that cannot append does not propagate', () => {

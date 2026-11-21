@@ -44,6 +44,8 @@ export const Config = z.object({
     .description('Local hours with no messages, "23-8". Anything arriving then is folded into the next daytime message.'),
   maxP0PerHour: z.number().default(1).description('At most this many "waiting" messages per hour; extra ones merge.'),
   backfillDays: z.number().default(30).description('First run only: how far back to look so the state file starts informed.'),
+  closedLookbackHours: z.number().default(24)
+    .description('Re-scan this many hours of closures each poll, so a closed issue settles its thread. Must be wider than the poll interval; the poll watermark cannot be used because it only moves forward.'),
   tokenEnv: z.string().default('GITHUB_TOKEN').description('Credential reference holding the GitHub token.'),
   muteBots: z.boolean().default(true).description('Ignore bot accounts ([bot], dependabot, github-actions…).'),
   stateFile: z.string().default('').description('Override the state path (defaults to ~/.dsh/repo-watch.json).'),
@@ -312,9 +314,17 @@ async function pollOnce(ctx, config) {
 
   // A closure is the one transition the open scan cannot see: settle those threads
   // so a resolved report stops asking for attention.
+  //
+  // The window is NOT the poll watermark: the watermark means "already polled up to",
+  // so anything closed before it is invisible forever. The first version used it and
+  // never settled anything — the issue was closed at 08:56, the watermark had already
+  // moved to 09:47. Re-scanning a fixed lookback is idempotent because a settled
+  // thread is skipped.
+  const lookbackHours = Math.max(1, Number(config?.closedLookbackHours ?? 24))
+  const closedSince = now - lookbackHours * 60 * 60 * 1000
   const closed = []
   for (const repo of repos) {
-    const result = await listClosedIssues(token, repo, { since })
+    const result = await listClosedIssues(token, repo, { since: closedSince })
     if (!result.ok && result.status !== 304) { failures.push(`closed ${repo}: ${result.error ?? result.status}`); continue }
     for (const key of closureTargets({ items: result.items, threads: state.threads })) {
       const thread = state.threads[key]

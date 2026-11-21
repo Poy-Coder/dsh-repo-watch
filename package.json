@@ -1,6 +1,6 @@
 {
   "name": "dsh-repo-watch",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "type": "module",
   "description": "DSH repository watchtower: it watches your GitHub repos in the background and only speaks up when someone is actually waiting on you.",
   "license": "MIT",
