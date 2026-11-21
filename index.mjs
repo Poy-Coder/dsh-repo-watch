@@ -61,12 +61,41 @@ const runtime = {
   lastPollAt: 0,
   lastPollError: '',
   lastPushAt: 0,
+  lastPushResult: '',
+  lastNoChannelAt: 0,
   pushesThisHour: 0,
   hourStartedAt: 0,
   token: '',
   me: '',
+  tools: undefined,
   repos: [],
   pendingQueue: [],
+}
+
+/** Messages held while no channel exists — bounded, so a channel-less setup cannot grow forever. */
+const MAX_QUEUE = 100
+/** Do not repeat the "no channel" complaint on every poll. */
+const NO_CHANNEL_QUIET_MS = 60 * 60 * 1000
+
+/**
+ * The channel tool this plugin would deliver through, if any.
+ *
+ * Exposed so `repo_watch_status` can answer "where do my messages go" and
+ * "why did nothing arrive" without reading code — a DSH with no channel plugin
+ * has nowhere to push, and that has to be visible rather than silent.
+ *
+ * @returns {string} tool name, or '' when no channel is installed
+ */
+export function pushTargetName(config = {}) {
+  const tools = runtime.tools
+  if (!tools?.definitions) return ''
+  let names = []
+  try {
+    names = tools.definitions().map((definition) => String(definition?.name ?? ''))
+  } catch { return '' }
+  const senders = names.filter((toolName) => /_send_message$/.test(toolName))
+  const preferred = String(config?.pushTool ?? '').trim()
+  return preferred && senders.includes(preferred) ? preferred : (senders[0] ?? '')
 }
 
 const errorText = (error) => (error instanceof Error ? error.message : String(error))
@@ -90,13 +119,8 @@ async function pushText(ctx, config, text) {
 
   const tools = typeof ctx.get === 'function' ? ctx.get('tools') : undefined
   if (!tools || typeof tools.execute !== 'function') return { ok: false, reason: 'no-tools' }
-  let names = []
-  try {
-    names = tools.definitions().map((definition) => String(definition?.name ?? ''))
-  } catch { /* registry unavailable */ }
-  const senders = names.filter((toolName) => /_send_message$/.test(toolName))
-  const preferred = String(config?.pushTool ?? '').trim()
-  const target = preferred && senders.includes(preferred) ? preferred : senders[0]
+  runtime.tools = tools
+  const target = pushTargetName(config)
   if (!target) return { ok: false, reason: 'no-channel' }
 
   try {
@@ -392,8 +416,21 @@ async function flushQueue(ctx, config) {
   if (inQuietHours(hour, config?.quietHours)) return
   const entries = runtime.pendingQueue.splice(0, runtime.pendingQueue.length)
   const sent = await pushText(ctx, config, composeWaitingMessage(entries))
-  if (!sent.ok) logRecord({ event: 'push', result: 'skipped', level: 'warn', reason: sent.reason, count: entries.length })
-  if (!sent.ok) runtime.pendingQueue.unshift(...entries)
+  runtime.lastPushResult = sent.ok ? 'sent' : String(sent.reason ?? 'failed')
+  if (sent.ok) return
+  logRecord({ event: 'push', result: 'skipped', level: 'warn', reason: sent.reason, count: entries.length })
+  // No channel at all is a configuration state, not a transient failure: hold the
+  // messages (bounded), and say so once an hour instead of every poll.
+  if (sent.reason === 'no-channel' && Date.now() - runtime.lastNoChannelAt > NO_CHANNEL_QUIET_MS) {
+    runtime.lastNoChannelAt = Date.now()
+    ctx.logger?.warn?.('repo-watch: no *_send_message tool found — waiting messages are queued, not delivered. Install a channel plugin (dsh-channel-feishu / dsh-channel-wechat-ilink) or set pushTool.')
+  }
+  runtime.pendingQueue.unshift(...entries)
+  if (runtime.pendingQueue.length > MAX_QUEUE) {
+    const dropped = runtime.pendingQueue.length - MAX_QUEUE
+    runtime.pendingQueue.splice(MAX_QUEUE)
+    logRecord({ event: 'push', result: 'queue-trimmed', level: 'warn', dropped })
+  }
 }
 
 
@@ -447,6 +484,9 @@ const statusTool = (config) => ({
     const lines = [
       `待你处理：${counts.pending} · 已看过：${counts.seen} · 已完成：${counts.done}`,
       `监视仓库：${watched}`,
+      `推送通道：${pushTargetName(config) || '(没有 *_send_message 工具——消息进不了任何聊天)'}`,
+      `排队未发：${runtime.pendingQueue.length}${runtime.pendingQueue.length > 0 && !pushTargetName(config) ? '（装上通道插件或设 pushTool 后自动补发）' : ''}`,
+      `上次推送：${runtime.lastPushAt ? `${new Date(runtime.lastPushAt).toLocaleString()}（${runtime.lastPushResult || 'sent'}）` : '还没推过'}`,
       `上次轮询：${runtime.lastPollAt ? new Date(runtime.lastPollAt).toLocaleString() : '还没跑过'}`,
       `登录身份：${runtime.me || '(未知)'}`,
       `状态文件：${statePath(config ?? {})}`,
@@ -650,4 +690,4 @@ const checkTool = (ctx, config) => ({
 })
 
 /** Exposed for the smoke test: wiring a delay keeps timers testable. */
-export const _internals = { pollOnce, pushText, runtime, delay, composeWaitingMessage, mergeActivity, selectDigestRows }
+export const _internals = { pollOnce, pushText, pushTargetName, runtime, delay, composeWaitingMessage, mergeActivity, selectDigestRows }
