@@ -22,7 +22,7 @@ import { excerptOf, lastHumanComment, listClosedIssues, listNotifications, listO
 import { countsOf, loadState, pruneThreads, saveState, statePath, upsertThread } from './lib/state.mjs'
 import { classify, priorityOf, progressOf, similarTo } from './lib/insight.mjs'
 import { logRecord } from './lib/log.mjs'
-import { bucketHint, bucketOf, bucketText, closureTargets, inQuietHours, isBotLogin, judgeNotification, judgeRepoItem, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
+import { bucketHint, bucketOf, bucketText, closureTargets, effectivePending, inQuietHours, isBotLogin, judgeNotification, judgeRepoItem, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
 
 export const name = 'repo-watch'
 
@@ -292,9 +292,18 @@ async function pollOnce(ctx, config) {
       continue
     }
     const previous = state.threads[candidate.key]
+    // A verdict of "pending" is not permission to re-open a settled thread: the
+    // judgement stays true until the other side speaks again, so writing it back
+    // unconditionally erased `ack done` on the next poll.
+    const pending = effectivePending({
+      pending: candidate.verdict.pending,
+      previous: previous?.state,
+      lastActivityAt: candidate.lastActivityAt,
+      stateSince: Number(previous?.stateSince ?? 0),
+    })
     const notify = shouldNotify({
       previous: previous?.state,
-      pending: true,
+      pending,
       lastActivityAt: candidate.lastActivityAt,
       stateSince: Number(previous?.stateSince ?? 0),
       snoozeUntil: Number(previous?.snoozeUntil ?? 0),
@@ -308,7 +317,7 @@ async function pollOnce(ctx, config) {
       lastActivityAt: candidate.lastActivityAt,
       reason: candidate.verdict.reason,
       url: candidate.url,
-    }, { pending: true, notify })
+    }, { pending, notify })
     if (notify) fresh.push({ ...candidate, reason: candidate.verdict.reason })
   }
 

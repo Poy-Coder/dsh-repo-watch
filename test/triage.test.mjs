@@ -12,6 +12,7 @@ import {
   bucketOf,
   bucketText,
   closureTargets,
+  effectivePending,
   inQuietHours,
   isBotLogin,
   judgeNotification,
@@ -120,8 +121,27 @@ test('an expired snooze resurfaces instead of going silent forever', () => {
   )
 })
 
-test('a plain seen thread (never snoozed) stays quiet', () => {
-  assert.equal(shouldNotify({ previous: 'seen', pending: true, lastActivityAt: 90, stateSince: 10, snoozeUntil: 0 }), false)
+test('a plain seen thread stays quiet until someone speaks again', () => {
+  // 没有新活动：安静
+  assert.equal(shouldNotify({ previous: 'seen', pending: true, lastActivityAt: 5, stateSince: 10 }), false)
+  // 有新活动：是新闻
+  assert.equal(shouldNotify({ previous: 'seen', pending: true, lastActivityAt: 90, stateSince: 10 }), true)
+})
+
+test('a settled thread is not re-opened by a poll', () => {
+  // 这是真实故障：ack done 之后，下一轮轮询把它又写回 pending，done 只活 15 分钟
+  const settledAt = 1_000
+  for (const state of ['done', 'seen']) {
+    assert.equal(effectivePending({ pending: true, previous: state, lastActivityAt: 900, stateSince: settledAt }), false,
+      `${state} + no new activity must stay settled`)
+    assert.equal(effectivePending({ pending: true, previous: state, lastActivityAt: 1_100, stateSince: settledAt }), true,
+      `${state} + newer activity must re-open`)
+  }
+  // pending 本来就是待处理；没有存储过的就是新的
+  assert.equal(effectivePending({ pending: true, previous: 'pending' }), true)
+  assert.equal(effectivePending({ pending: true }), true)
+  // 判定不为待处理时，永远不该是 pending
+  assert.equal(effectivePending({ pending: false, previous: 'done' }), false)
 })
 
 test('a closure settles only threads already tracked', () => {
