@@ -102,20 +102,25 @@ const threads = {
   'o/r#2': { state: 'pending', reason: 'external-issue', lastActivityAt: 200 },
   'o/r#3': { state: 'done', reason: 'someone-replied-to-my-thread', lastActivityAt: 100 },
   'o/r#4': { state: 'seen', reason: 'mentioned', lastActivityAt: 400, snoozeUntil: 9_999_999_999 },
+  'o/r#5': { state: 'seen', reason: 'comment', lastActivityAt: 500, snoozeUntil: 500 },
+  'o/r#6': { state: 'seen', reason: 'comment', lastActivityAt: 600 },
 }
 
 test('waiting and deep list the same threads', () => {
   const waiting = selectDigestRows(threads, { wanted: 'waiting', now: 1_000 }).map(([key]) => key)
   const deep = selectDigestRows(threads, { wanted: 'deep', now: 1_000 }).map(([key]) => key)
   assert.deepEqual(deep, waiting)
-  assert.deepEqual(waiting, ['o/r#4', 'o/r#1', 'o/r#2'], 'snoozed first by recency, then pending, never done')
+  // 延后中(#4)与延后已过期(#5)都算"还欠着"；手动 seen(#6)不算
+  assert.deepEqual(waiting, ['o/r#5', 'o/r#4', 'o/r#1', 'o/r#2'])
 })
 
 test('a snoozed thread is listed in waiting but not in quiet', () => {
   const waiting = selectDigestRows(threads, { wanted: 'waiting', now: 1_000 }).map(([key]) => key)
   assert.ok(waiting.includes('o/r#4'))
+  assert.ok(waiting.includes('o/r#5'), 'expired snooze must come back')
+  assert.equal(waiting.includes('o/r#6'), false, 'a plain seen thread stays out')
   const quiet = selectDigestRows(threads, { wanted: 'quiet', now: 1_000 }).map(([key]) => key)
-  assert.deepEqual(quiet, ['o/r#3'], 'quiet is the non-pending set')
+  assert.deepEqual(quiet, ['o/r#6', 'o/r#3'], 'quiet is the non-pending, non-snoozed set')
 })
 
 test('the bucket narrows the set', () => {

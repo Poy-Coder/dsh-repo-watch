@@ -434,13 +434,14 @@ const statusTool = (config) => ({
  */
 export function selectDigestRows(threads, { wanted = 'waiting', bucket = 'all', now = Date.now() } = {}) {
   const wantsPending = wanted === 'waiting' || wanted === 'deep'
-  const snoozed = (thread) => thread?.state === 'seen' && Number(thread?.snoozeUntil ?? 0) > now
+  // A snoozed thread stays owed after its window passes: the snooze was "not now",
+  // not "never". `ack seen` (no snooze) is the one state that leaves the list, which
+  // is why the test is `snoozeUntil > 0` rather than "still snoozed".
+  const wasSnoozed = (thread) => thread?.state === 'seen' && Number(thread?.snoozeUntil ?? 0) > 0
   return Object.entries(threads ?? {})
     .filter(([, thread]) => {
-      if (wantsPending) return thread?.state === 'pending' || snoozed(thread)
-      // A snoozed thread is owed an answer, so it lives in "waiting" only — listing
-      // it in "quiet" as well would show the same item twice.
-      return thread?.state !== 'pending' && !snoozed(thread)
+      if (wantsPending) return thread?.state === 'pending' || wasSnoozed(thread)
+      return thread?.state !== 'pending' && !wasSnoozed(thread)
     })
     .filter(([, thread]) => bucket === 'all' || bucketOf(thread?.reason) === bucket)
     .sort((a, b) => Number(b[1]?.lastActivityAt ?? 0) - Number(a[1]?.lastActivityAt ?? 0))
@@ -513,8 +514,12 @@ const digestTool = (config) => ({
         lines.push(`   ${when}`)
       }
       if (thread.url) lines.push(`   ${thread.url}`)
-      if (Number(thread.snoozeUntil ?? 0) > Date.now()) {
-        lines.push(`   已延后到 ${new Date(Number(thread.snoozeUntil)).toLocaleString()}`)
+      const snoozeUntil = Number(thread.snoozeUntil ?? 0)
+      if (snoozeUntil > Date.now()) {
+        lines.push(`   已延后到 ${new Date(snoozeUntil).toLocaleString()}`)
+      } else if (snoozeUntil > 0) {
+        // The window passed while nobody acted: say so instead of quietly dropping it.
+        lines.push('   延后已到期，等你处理')
       }
       if (wanted === 'deep') {
         const classification = classify({ title: thread.title, kind: thread.kind })
@@ -579,7 +584,12 @@ const ackTool = (config) => ({
       return { ok: false, text: `未知状态：${target}` }
     }
     saveState(config ?? {}, state)
-    return { ok: true, text: `${key} → ${thread.state}${thread.snoozeUntil ? `（到 ${new Date(thread.snoozeUntil).toLocaleString()}）` : ''}` }
+    // Say what happened in the user's terms: "已延后" is the action, `seen` is an
+    // internal state name that reads like the thread was marked read.
+    const text = target === 'snooze'
+      ? `${key} → 已延后到 ${new Date(Number(thread.snoozeUntil)).toLocaleString()}`
+      : `${key} → ${thread.state === 'done' ? '已完成' : '已看过'}`
+    return { ok: true, text }
   },
 })
 
