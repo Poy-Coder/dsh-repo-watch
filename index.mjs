@@ -18,11 +18,11 @@ import { setTimeout as delay } from 'node:timers/promises'
 
 import z from '@deepseek-ai/schemastery'
 
-import { excerptOf, lastHumanComment, listClosedIssues, listNotifications, listOwnRepos, listRepoIssues, resolveToken, whoami } from './lib/github.mjs'
+import { excerptOf, issueState, lastHumanComment, listClosedIssues, listNotifications, listOwnRepos, listRepoIssues, resolveToken, whoami } from './lib/github.mjs'
 import { countsOf, loadState, pruneThreads, saveState, statePath, upsertThread } from './lib/state.mjs'
 import { classify, priorityOf, progressOf, similarTo } from './lib/insight.mjs'
 import { logRecord } from './lib/log.mjs'
-import { bucketHint, bucketOf, bucketText, closureTargets, effectivePending, inQuietHours, isBotLogin, judgeNotification, judgeRepoItem, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
+import { bucketHint, bucketOf, bucketText, closureTargets, effectivePending, foreignThreadsOf, inQuietHours, isBotLogin, judgeNotification, judgeRepoItem, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
 
 export const name = 'repo-watch'
 
@@ -44,6 +44,8 @@ export const Config = z.object({
     .description('Local hours with no messages, "23-8". Anything arriving then is folded into the next daytime message.'),
   maxP0PerHour: z.number().default(1).description('At most this many "waiting" messages per hour; extra ones merge.'),
   backfillDays: z.number().default(30).description('First run only: how far back to look so the state file starts informed.'),
+  recheckForeignThreads: z.boolean().default(true)
+    .description('Re-read threads filed in repositories you do not own each poll, so a merged or closed PR stops asking for attention.'),
   closedLookbackHours: z.number().default(24)
     .description('Re-scan this many hours of closures each poll, so a closed issue settles its thread. Must be wider than the poll interval; the poll watermark cannot be used because it only moves forward.'),
   tokenEnv: z.string().default('GITHUB_TOKEN').description('Credential reference holding the GitHub token.'),
@@ -343,6 +345,31 @@ async function pollOnce(ctx, config) {
       thread.resolvedBy = 'closed'
       closed.push(key)
       logRecord({ event: 'inbound', result: 'settled-by-closure', level: 'info', thread: key })
+    }
+  }
+
+  // Threads in other people's repositories are invisible to the scans above: the
+  // notification list only reports *new* activity, so a PR merged or closed there
+  // stayed "waiting on you" forever. Check those few directly — capped, because a
+  // user could in principle track hundreds.
+  if (config?.recheckForeignThreads !== false) {
+    const foreign = foreignThreadsOf({ threads: state.threads, ownRepos: repos }).slice(0, 30)
+    for (const item of foreign) {
+      const result = await issueState(token, item.repo, item.number, {})
+      if (!result.ok) {
+        // A thread we cannot read is not a resolved thread: leave it, note it.
+        if (result.status !== 404) failures.push(`state ${item.key}: ${result.error ?? result.status}`)
+        continue
+      }
+      if (result.state !== 'closed') continue
+      const thread = state.threads[item.key]
+      if (!thread) continue
+      thread.state = 'done'
+      thread.stateSince = now
+      thread.snoozeUntil = 0
+      thread.resolvedBy = 'closed-elsewhere'
+      closed.push(item.key)
+      logRecord({ event: 'inbound', result: 'settled-elsewhere', level: 'info', thread: item.key, repo: item.repo })
     }
   }
 
