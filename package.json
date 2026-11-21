@@ -23,7 +23,8 @@
     "icon.svg",
     "test/*.mjs",
     "README.md",
-    ".github/workflows/ci.yml",`n    "AGENTS.md",
+    ".github/workflows/ci.yml",
+    "AGENTS.md",
     "LICENSE"
   ],
   "dsh": {
