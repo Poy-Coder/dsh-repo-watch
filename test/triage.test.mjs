@@ -11,6 +11,7 @@ import {
   bucketHint,
   bucketOf,
   bucketText,
+  closureTargets,
   inQuietHours,
   isBotLogin,
   judgeNotification,
@@ -121,6 +122,36 @@ test('an expired snooze resurfaces instead of going silent forever', () => {
 
 test('a plain seen thread (never snoozed) stays quiet', () => {
   assert.equal(shouldNotify({ previous: 'seen', pending: true, lastActivityAt: 90, stateSince: 10, snoozeUntil: 0 }), false)
+})
+
+test('a closure settles only threads already tracked', () => {
+  const threads = {
+    'o/r#1': { state: 'pending' },
+    'o/r#2': { state: 'done' },
+  }
+  const items = [
+    { url: 'https://api.github.com/repos/o/r/issues/1' },
+    { url: 'https://api.github.com/repos/o/r/issues/2' },
+    { url: 'https://api.github.com/repos/o/r/issues/9' },
+    { url: 'nonsense' },
+  ]
+  // #1 待处理 → 结案；#2 已 done → 不重复；#9 从未跟踪 → 不为它建条目
+  assert.deepEqual(closureTargets({ items, threads }), ['o/r#1'])
+})
+
+test('the same closure reported twice settles once', () => {
+  const threads = { 'o/r#1': { state: 'pending' } }
+  const items = [
+    { url: 'https://api.github.com/repos/o/r/issues/1' },
+    { url: 'https://api.github.com/repos/o/r/pulls/1' },
+  ]
+  assert.deepEqual(closureTargets({ items, threads }), ['o/r#1'])
+})
+
+test('no threads or no items is not an error', () => {
+  assert.deepEqual(closureTargets({ items: [], threads: { 'o/r#1': { state: 'pending' } } }), [])
+  assert.deepEqual(closureTargets({ items: [{ url: 'https://api.github.com/repos/o/r/issues/1' }], threads: {} }), [])
+  assert.deepEqual(closureTargets({}), [])
 })
 
 test('quiet hours wrap around midnight', () => {

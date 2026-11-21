@@ -18,10 +18,10 @@ import { setTimeout as delay } from 'node:timers/promises'
 
 import z from '@deepseek-ai/schemastery'
 
-import { excerptOf, lastHumanComment, listNotifications, listOwnRepos, listRepoIssues, resolveToken, whoami } from './lib/github.mjs'
+import { excerptOf, lastHumanComment, listClosedIssues, listNotifications, listOwnRepos, listRepoIssues, resolveToken, whoami } from './lib/github.mjs'
 import { countsOf, loadState, pruneThreads, saveState, statePath, upsertThread } from './lib/state.mjs'
 import { classify, priorityOf, progressOf, similarTo } from './lib/insight.mjs'
-import { bucketHint, bucketOf, bucketText, inQuietHours, isBotLogin, judgeNotification, judgeRepoItem, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
+import { bucketHint, bucketOf, bucketText, closureTargets, inQuietHours, isBotLogin, judgeNotification, judgeRepoItem, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
 
 export const name = 'repo-watch'
 
@@ -108,6 +108,9 @@ async function pushText(ctx, config, text) {
     if (first?.isError) return { ok: false, reason: `tool-error: ${target}` }
     runtime.pushesThisHour += 1
     runtime.lastPushAt = now
+    // Log the delivery, not just the attempt: "why did I get no push" is only
+    // answerable if a successful send leaves a record.
+    logInbound(config, { event: 'push', result: 'sent', level: 'info', tool: target, chars: String(text ?? '').length })
     return { ok: true, tool: target }
   } catch (error) {
     return { ok: false, reason: `dispatch-failed: ${errorText(error)}` }
@@ -306,6 +309,23 @@ async function pollOnce(ctx, config) {
     if (notify) fresh.push({ ...candidate, reason: candidate.verdict.reason })
   }
 
+  // A closure is the one transition the open scan cannot see: settle those threads
+  // so a resolved report stops asking for attention.
+  const closed = []
+  for (const repo of repos) {
+    const result = await listClosedIssues(token, repo, { since })
+    if (!result.ok && result.status !== 304) { failures.push(`closed ${repo}: ${result.error ?? result.status}`); continue }
+    for (const key of closureTargets({ items: result.items, threads: state.threads })) {
+      const thread = state.threads[key]
+      thread.state = 'done'
+      thread.stateSince = now
+      thread.snoozeUntil = 0
+      thread.resolvedBy = 'closed'
+      closed.push(key)
+      logInbound(config, { event: 'inbound', result: 'settled-by-closure', level: 'info', thread: key })
+    }
+  }
+
   state.activity = mergeActivity(state.activity, noticed, now)
   state.watermark = now
   pruneThreads(state, now)
@@ -315,7 +335,7 @@ async function pollOnce(ctx, config) {
   runtime.lastPollError = failures.join('; ')
 
   if (fresh.length > 0 && config?.notify !== false) runtime.pendingQueue.push(...fresh)
-  return { ok: true, scanned: candidates.length, fresh: fresh.length, failures }
+  return { ok: true, scanned: candidates.length, fresh: fresh.length, closed: closed.length, failures }
 }
 
 /** Flush queued "waiting" items, respecting the quiet window. */
@@ -325,6 +345,7 @@ async function flushQueue(ctx, config) {
   if (inQuietHours(hour, config?.quietHours)) return
   const entries = runtime.pendingQueue.splice(0, runtime.pendingQueue.length)
   const sent = await pushText(ctx, config, composeWaitingMessage(entries))
+  if (!sent.ok) logInbound(config, { event: 'push', result: 'skipped', level: 'warn', reason: sent.reason, count: entries.length })
   if (!sent.ok) runtime.pendingQueue.unshift(...entries)
 }
 
