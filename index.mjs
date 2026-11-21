@@ -388,6 +388,32 @@ const statusTool = (config) => ({
   },
 })
 
+/**
+ * Which stored threads a digest lists.
+ *
+ * `deep` is `waiting` with more detail — it must select the same set. The first
+ * version sent it down the "not pending" branch, so `deep` silently returned
+ * "没有其他活动。" against four pending threads (found by calling the real tool, not
+ * by previewing it).
+ *
+ * @param {Record<string, object>} threads
+ * @param {{ wanted: string, bucket?: string, now?: number }} options
+ * @returns {Array<[string, object]>} newest activity first
+ */
+export function selectDigestRows(threads, { wanted = 'waiting', bucket = 'all', now = Date.now() } = {}) {
+  const wantsPending = wanted === 'waiting' || wanted === 'deep'
+  const snoozed = (thread) => thread?.state === 'seen' && Number(thread?.snoozeUntil ?? 0) > now
+  return Object.entries(threads ?? {})
+    .filter(([, thread]) => {
+      if (wantsPending) return thread?.state === 'pending' || snoozed(thread)
+      // A snoozed thread is owed an answer, so it lives in "waiting" only — listing
+      // it in "quiet" as well would show the same item twice.
+      return thread?.state !== 'pending' && !snoozed(thread)
+    })
+    .filter(([, thread]) => bucket === 'all' || bucketOf(thread?.reason) === bucket)
+    .sort((a, b) => Number(b[1]?.lastActivityAt ?? 0) - Number(a[1]?.lastActivityAt ?? 0))
+}
+
 const digestTool = (config) => ({
   name: 'repo_watch_digest',
   description:
@@ -437,16 +463,9 @@ const digestTool = (config) => ({
     }
 
     const nowMs = Date.now()
-    const rows = Object.entries(state.threads)
-      // A snoozed thread is still owed an answer: it belongs in "waiting", marked as
-      // deferred, instead of disappearing until someone remembers it exists.
-      .filter(([, thread]) => (wanted === 'waiting'
-        ? thread.state === 'pending' || (thread.state === 'seen' && Number(thread.snoozeUntil ?? 0) > nowMs)
-        : thread.state !== 'pending'))
-      .filter(([, thread]) => bucket === 'all' || bucketOf(thread.reason) === bucket)
-      .sort((a, b) => Number(b[1]?.lastActivityAt ?? 0) - Number(a[1]?.lastActivityAt ?? 0))
+    const rows = selectDigestRows(state.threads, { wanted, bucket, now: nowMs })
     if (rows.length === 0) {
-      return { ok: true, text: wanted === 'waiting' ? '没有需要你处理的。' : '没有其他活动。' }
+      return { ok: true, text: wanted === 'waiting' || wanted === 'deep' ? '没有需要你处理的。' : '没有其他活动。' }
     }
     const shown = rows.slice(0, limit)
     const head = shown.length === 1 ? '1 条' : `${shown.length} 条`
@@ -553,4 +572,4 @@ const checkTool = (ctx, config) => ({
 })
 
 /** Exposed for the smoke test: wiring a delay keeps timers testable. */
-export const _internals = { pollOnce, pushText, runtime, delay, composeWaitingMessage, mergeActivity }
+export const _internals = { pollOnce, pushText, runtime, delay, composeWaitingMessage, mergeActivity, selectDigestRows }

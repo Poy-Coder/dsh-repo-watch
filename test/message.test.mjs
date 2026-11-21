@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 
 import { _internals } from '../index.mjs'
 
-const { composeWaitingMessage, mergeActivity } = _internals
+const { composeWaitingMessage, mergeActivity, selectDigestRows } = _internals
 
 const entry = (over = {}) => ({
   key: 'owner/repo#1',
@@ -90,4 +90,37 @@ test('quiet activity forgets what is older than a month', () => {
     now,
   )
   assert.deepEqual(merged.map((item) => item.key), ['fresh#2'])
+})
+
+// ---------------------------------------------------------------------------
+// Which threads a digest lists. `deep` once fell into the "not pending" branch
+// and answered "没有其他活动。" against four pending threads.
+// ---------------------------------------------------------------------------
+
+const threads = {
+  'o/r#1': { state: 'pending', reason: 'someone-replied-to-my-thread', lastActivityAt: 300 },
+  'o/r#2': { state: 'pending', reason: 'external-issue', lastActivityAt: 200 },
+  'o/r#3': { state: 'done', reason: 'someone-replied-to-my-thread', lastActivityAt: 100 },
+  'o/r#4': { state: 'seen', reason: 'mentioned', lastActivityAt: 400, snoozeUntil: 9_999_999_999 },
+}
+
+test('waiting and deep list the same threads', () => {
+  const waiting = selectDigestRows(threads, { wanted: 'waiting', now: 1_000 }).map(([key]) => key)
+  const deep = selectDigestRows(threads, { wanted: 'deep', now: 1_000 }).map(([key]) => key)
+  assert.deepEqual(deep, waiting)
+  assert.deepEqual(waiting, ['o/r#4', 'o/r#1', 'o/r#2'], 'snoozed first by recency, then pending, never done')
+})
+
+test('a snoozed thread is listed in waiting but not in quiet', () => {
+  const waiting = selectDigestRows(threads, { wanted: 'waiting', now: 1_000 }).map(([key]) => key)
+  assert.ok(waiting.includes('o/r#4'))
+  const quiet = selectDigestRows(threads, { wanted: 'quiet', now: 1_000 }).map(([key]) => key)
+  assert.deepEqual(quiet, ['o/r#3'], 'quiet is the non-pending set')
+})
+
+test('the bucket narrows the set', () => {
+  const action = selectDigestRows(threads, { wanted: 'deep', bucket: 'action', now: 1_000 }).map(([key]) => key)
+  assert.deepEqual(action, ['o/r#2'])
+  const reply = selectDigestRows(threads, { wanted: 'waiting', bucket: 'reply', now: 1_000 }).map(([key]) => key)
+  assert.deepEqual(reply, ['o/r#4', 'o/r#1'])
 })
