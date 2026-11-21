@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # The plugin is tested from source, the same way it runs: no build step, no
+      # bundler. `npm install` brings in @deepseek-ai/schemastery, which index.mjs
+      # imports for its Config schema.
+      - run: npm install --no-audit --no-fund
+      - run: npm test
