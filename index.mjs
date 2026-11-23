@@ -22,7 +22,7 @@ import { excerptOf, issueState, lastHumanComment, listClosedIssues, listNotifica
 import { countsOf, loadState, pruneThreads, saveState, statePath, upsertThread } from './lib/state.mjs'
 import { classify, priorityOf, progressOf, similarTo } from './lib/insight.mjs'
 import { logRecord } from './lib/log.mjs'
-import { bucketHint, bucketOf, bucketText, closureTargets, effectivePending, foreignThreadsOf, inQuietHours, isBotLogin, judgeNotification, judgeRepoItem, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
+import { bucketHint, bucketOf, bucketText, closureTargets, effectivePending, foreignThreadsOf, inQuietHours, isBotLogin, judgeNotification, judgeRepoItem, partitionQueue, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
 
 export const name = 'repo-watch'
 
@@ -414,20 +414,26 @@ async function flushQueue(ctx, config) {
   if (runtime.pendingQueue.length === 0) return
   const hour = new Date().getHours()
   if (inQuietHours(hour, config?.quietHours)) return
-  const entries = runtime.pendingQueue.splice(0, runtime.pendingQueue.length)
-  const sent = await pushText(ctx, config, composeWaitingMessage(entries))
+  // Re-read the stored state before sending: an entry queued last night may have been
+  // resolved since (closure, ack, snooze), and announcing it would be a roll-call for
+  // work that is already done.
+  const { live, dropped } = partitionQueue(runtime.pendingQueue, loadState(config ?? {}).threads)
+  runtime.pendingQueue.length = 0
+  if (dropped > 0) logRecord({ event: 'push', result: 'dropped-settled', level: 'info', count: dropped })
+  if (live.length === 0) return
+  const sent = await pushText(ctx, config, composeWaitingMessage(live))
   runtime.lastPushResult = sent.ok ? 'sent' : String(sent.reason ?? 'failed')
   if (sent.ok) return
-  logRecord({ event: 'push', result: 'skipped', level: 'warn', reason: sent.reason, count: entries.length })
+  logRecord({ event: 'push', result: 'skipped', level: 'warn', reason: sent.reason, count: live.length })
   // No channel at all is a configuration state, not a transient failure: hold the
   // messages (bounded), and say so once an hour instead of every poll.
   if (sent.reason === 'no-channel' && Date.now() - runtime.lastNoChannelAt > NO_CHANNEL_QUIET_MS) {
     runtime.lastNoChannelAt = Date.now()
     ctx.logger?.warn?.('repo-watch: no *_send_message tool found — waiting messages are queued, not delivered. Install a channel plugin (dsh-channel-feishu / dsh-channel-wechat-ilink) or set pushTool.')
   }
-  runtime.pendingQueue.unshift(...entries)
+  runtime.pendingQueue.unshift(...live)
   if (runtime.pendingQueue.length > MAX_QUEUE) {
-    const dropped = runtime.pendingQueue.length - MAX_QUEUE
+    const trimmed = runtime.pendingQueue.length - MAX_QUEUE
     runtime.pendingQueue.splice(MAX_QUEUE)
     logRecord({ event: 'push', result: 'queue-trimmed', level: 'warn', dropped })
   }
