@@ -29,6 +29,7 @@ DSH 宿主插件（不是 bundle 补丁），后台轮询 GitHub，只在“有�
 7. **一次推送只说“几条 + 各自要什么”**，明细走 `查看`。
 8. **没有通道时消息不能悄悄消失**：守望自己不会输出，它调某个通道的 `*_send_message`。一个通道都没装时，消息留在内存队列（上限 100，超出丢最旧并记日志），`repo_watch_status` 显示推送通道 / 排队数 / 上次推送结果，并每小时提示一次。选通道用 `pushTargetName()`，`pushTool` 为空则取第一个 `*_send_message`——**安装顺序会决定去向，所以生产环境应显式 pin**。
 9. **队列不是真相，发送前必须复查**：消息能在队列里躺一整夜（静默时段、每小时上限），这期间它的 thread 完全可能已经结案。`flushQueue` 用 `partitionQueue(entries, threads)` 只发 `state === 'pending'` 的条目，其余丢弃并记 `push/dropped-settled`。不这么做就会推出「有 1 条需要你」而用户点开详情发现 0 条——2026-11-22 真实发生过（消息排队时 PR 被合并，7 小时后才发出去）。
+10. **版本检查只提醒，绝不自动更新**：`lib/update.mjs` 每天最多问一次 registry，缓存在 `<DSH_HOME>/repo-watch-update.json`，任何失败都静默；`repo_watch_status` 显示 `新版本：X 可用（当前 Y）`。自动升级会在用户使用时换掉代码，而 DSH 自己的更新路径也要求显式操作——不要加自动更新。
 
 ## 怎么改才安全
 

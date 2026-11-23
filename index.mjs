@@ -14,6 +14,7 @@
  *     them to the network, a timer, and the chat channel.
  *   - It never writes to GitHub. No comment, no label, no close.
  */
+import { readFileSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
 
 import z from '@deepseek-ai/schemastery'
@@ -22,6 +23,7 @@ import { excerptOf, issueState, lastHumanComment, listClosedIssues, listNotifica
 import { countsOf, loadState, pruneThreads, saveState, statePath, upsertThread } from './lib/state.mjs'
 import { classify, priorityOf, progressOf, similarTo } from './lib/insight.mjs'
 import { logRecord } from './lib/log.mjs'
+import { refreshVersionCache, updateNotice, versionCachePath } from './lib/update.mjs'
 import { bucketHint, bucketOf, bucketText, closureTargets, effectivePending, foreignThreadsOf, inQuietHours, isBotLogin, judgeNotification, judgeRepoItem, partitionQueue, reasonText, shouldNotify, threadOf } from './lib/triage.mjs'
 
 export const name = 'repo-watch'
@@ -70,6 +72,7 @@ const runtime = {
   tools: undefined,
   repos: [],
   pendingQueue: [],
+  latestVersion: '',
 }
 
 /** Messages held while no channel exists — bounded, so a channel-less setup cannot grow forever. */
@@ -99,6 +102,16 @@ export function pushTargetName(config = {}) {
 }
 
 const errorText = (error) => (error instanceof Error ? error.message : String(error))
+
+/** The running version, read from the manifest this module ships with. */
+export function readRunningVersion() {
+  try {
+    const raw = readFileSync(new URL('./package.json', import.meta.url), 'utf8')
+    return String(JSON.parse(raw).version ?? '')
+  } catch {
+    return ''
+  }
+}
 
 /**
  * Deliver one piece of text through whatever channel this DSH already has.
@@ -446,6 +459,16 @@ export function apply(ctx, config) {
   ctx.tools.register(ackTool(config))
   ctx.tools.register(checkTool(ctx, config))
 
+  // Ask the registry once a day whether a newer version exists; `repo_watch_status`
+  // reports it. Fire and forget: an offline registry must not delay startup.
+  void refreshVersionCache({
+    name: 'dsh-repo-watch',
+    version: readRunningVersion(),
+    stateFile: versionCachePath('repo-watch'),
+  }).then((info) => {
+    runtime.latestVersion = String(info.latest ?? '')
+  }).catch(() => {})
+
   ctx.effect(() => {
     let disposed = false
     const minutes = Math.max(1, Number(config?.pollMinutes ?? 15))
@@ -495,6 +518,10 @@ const statusTool = (config) => ({
       `上次推送：${runtime.lastPushAt ? `${new Date(runtime.lastPushAt).toLocaleString()}（${runtime.lastPushResult || 'sent'}）` : '还没推过'}`,
       `上次轮询：${runtime.lastPollAt ? new Date(runtime.lastPollAt).toLocaleString() : '还没跑过'}`,
       `登录身份：${runtime.me || '(未知)'}`,
+      ...(() => {
+        const notice = updateNotice({ version: readRunningVersion(), latest: runtime.latestVersion })
+        return notice ? [notice] : []
+      })(),
       `状态文件：${statePath(config ?? {})}`,
     ]
     if (runtime.lastPollError) lines.push(`上次错误：${runtime.lastPollError}`)
